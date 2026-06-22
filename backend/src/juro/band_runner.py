@@ -1,0 +1,435 @@
+"""
+Band submission runtime for the Juro adversarial tribunal.
+
+Subcommands:
+    python -m juro.band_runner setup      Register 4 agents + create tribunal room
+    python -m juro.band_runner case       Submit the sample case into the room
+    python -m juro.band_runner export     Export room transcript → web/public/transcript.json
+    python -m juro.band_runner teardown   Delete registered agents
+
+Reuses the BandHumanAPI wrappers from juro/band_api.py for all
+REST calls. The agents themselves run as separate processes (see juro/agents/).
+
+Architecture difference from Quorum:
+  - Quorum: 4 rooms, hub-and-spoke, cooperative
+  - Juro: 1 shared room, adversarial debate, Adjudicator moderates via @mentions
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import sys
+
+import httpx
+import yaml
+from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
+
+_BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+_ENV_PATH = os.path.join(_BACKEND_ROOT, ".env")
+_AGENT_CONFIG_PATH = os.path.join(_BACKEND_ROOT, "agent_config.yaml")
+_REPO_ROOT = os.path.abspath(os.path.join(_BACKEND_ROOT, ".."))
+_TRANSCRIPT_OUT = os.path.join(_REPO_ROOT, "web", "public", "transcript.json")
+
+
+def _load_env() -> None:
+    if os.path.exists(_ENV_PATH):
+        load_dotenv(_ENV_PATH)
+
+
+def _user_api_key() -> str:
+    _load_env()
+    key = os.environ.get("THENVOI_API_KEY", "")
+    if not key:
+        raise SystemExit("THENVOI_API_KEY not set — see backend/.env.example.")
+    return key
+
+
+def _rest_url() -> str:
+    return os.environ.get("THENVOI_REST_URL", "https://app.band.ai")
+
+
+_src = os.path.join(_BACKEND_ROOT, "src")
+if _src not in sys.path:
+    sys.path.insert(0, _src)
+
+
+def _get_api():
+    from juro.band_api import BandHumanAPI
+    return BandHumanAPI(_rest_url(), _user_api_key())
+
+
+# --- Agent definitions for Juro (adversarial tribunal) ---
+
+AGENT_DEFS = [
+    {"key": "advocate", "name": "Advocate",
+     "description": "Juro tribunal: argues FOR the patient — marshals clinical + policy facts for coverage."},
+    {"key": "scrutinizer", "name": "Scrutinizer",
+     "description": "Juro tribunal: argues FOR the denial — exclusions, missing docs, cost-appropriateness."},
+    {"key": "evidence", "name": "Evidence",
+     "description": "Juro tribunal: neutral — produces the specific record that settles a dispute."},
+    {"key": "adjudicator", "name": "Adjudicator",
+     "description": "Juro tribunal: moderates the debate, recommends OVERTURN/UPHOLD, defers to human."},
+]
+
+
+# --- The case (built from cases.py so both paths debate the same claims) ---
+
+from juro.cases import CASES, DEFAULT_CASE_ID
+
+
+def _build_case_brief(case_id: str) -> str:
+    """Render a tribunal case brief from the shared case library (cases.py)."""
+    if case_id not in CASES:
+        raise SystemExit(f"Unknown case id '{case_id}'. Choose one of: {', '.join(CASES)}")
+    case = CASES[case_id]["case"]
+    lines = []
+    for e in CASES[case_id]["evidence"]:
+        text = e.get("detail", e.get("authority", ""))
+        lines.append(f"  {e['id']} [{e['kind']}] {e['label']}: {text} (cite {e['cite']})")
+    evidence = "\n".join(lines)
+    return (
+        f"CLAIM {case['claimId']} - {case['patient']}\n"
+        f"Procedure: {case['procedure']} ({case['amount']})\n"
+        f"Insurer: {case['insurer']}\n"
+        f"Plan type: {case['planType']}\n"
+        f"DENIAL: {case['denialReason']}\n\n"
+        f"EVIDENCE ON THE RECORD:\n{evidence}\n\n"
+        "@Adjudicator - please convene the tribunal and adjudicate this denied claim."
+    )
+
+
+def _save_agent_config(agents: dict[str, dict]) -> None:
+    cfg = {}
+    if os.path.exists(_AGENT_CONFIG_PATH):
+        with open(_AGENT_CONFIG_PATH) as f:
+            cfg = yaml.safe_load(f) or {}
+    cfg.setdefault("agents", {})
+    for key, data in agents.items():
+        cfg["agents"][key] = {
+            "agent_id": data["id"],
+            "api_key": data["api_key"],
+        }
+    with open(_AGENT_CONFIG_PATH, "w") as f:
+        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+
+
+def _append_env(env_vars: dict[str, str]) -> None:
+    lines = []
+    if os.path.exists(_ENV_PATH):
+        with open(_ENV_PATH) as f:
+            lines = f.readlines()
+    updated, out = set(), []
+    for line in lines:
+        s = line.strip()
+        matched = False
+        for k, v in env_vars.items():
+            if s.startswith(f"{k}=") or s.startswith(f"{k} ="):
+                out.append(f"{k}={v}\n")
+                updated.add(k)
+                matched = True
+                break
+        if not matched:
+            out.append(line)
+    remaining = {k: v for k, v in env_vars.items() if k not in updated}
+    if remaining:
+        if out and out[-1].strip():
+            out.append("\n")
+        out.append("# Auto-generated by juro.band_runner setup\n")
+        for k, v in remaining.items():
+            out.append(f"{k}={v}\n")
+    with open(_ENV_PATH, "w") as f:
+        f.writelines(out)
+
+
+# ============================================================================
+# SETUP — register agents + create the shared tribunal room
+# ============================================================================
+
+async def cmd_setup() -> None:
+    _load_env()
+    api_key = _user_api_key()
+
+    if not api_key.startswith("thnv_u_"):
+        print("WARNING: THENVOI_API_KEY should be a USER key (thnv_u_…).", file=sys.stderr)
+
+    print(f"\n⚖️  Provisioning Juro tribunal on {_rest_url()}\n" + "=" * 55)
+
+    registered: dict[str, dict] = {}
+    api = _get_api()
+    async with api:
+        # Step 1 — Register agents
+        print("Step 1 — Registering tribunal agents…")
+        for d in AGENT_DEFS:
+            res = await api.register_agent(d["name"], d["description"])
+            agent_id = res.get("agent", {}).get("id", "")
+            agent_key = res.get("credentials", {}).get("api_key", "")
+            if not agent_id or not agent_key:
+                print(f"  ERROR: incomplete registration for {d['name']}: {res}", file=sys.stderr)
+                sys.exit(1)
+            registered[d["key"]] = {
+                "id": agent_id,
+                "api_key": agent_key,
+                "name": d["name"],
+            }
+            print(f"  {d['name']:14s} → id={agent_id}  key={agent_key[:16]}…")
+
+        _save_agent_config(registered)
+        print(f"  Saved credentials → {_AGENT_CONFIG_PATH}")
+
+        # Step 2 — Create ONE shared tribunal room + add all agents.
+        # NOTE: programmatic room creation goes through Band's Human API, which is
+        # now gated behind an Enterprise plan (HTTP 403 plan_required on a normal
+        # account). Agent *registration* and the agent *WebSocket runtime* are not
+        # gated, so the live debate still happens — we just create the room in the
+        # Band web app instead of over REST. We try REST first and fall back.
+        print("Step 2 — Creating tribunal room…")
+        room_id = ""
+        try:
+            room = await api.create_room(title="Tribunal")
+            room_id = room.get("id", "")
+            for data in registered.values():
+                await api.add_participant(room_id, data["id"], role="member")
+            agent_names = ", ".join(d["name"] for d in AGENT_DEFS)
+            print(f"  Tribunal room → {room_id}  ({agent_names})")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (402, 403):
+                print("  Human API room creation needs an Enterprise plan — skipping.")
+                print("  Create the room in the Band web app instead (instructions below).")
+            else:
+                raise
+
+    if room_id:
+        _append_env({"VERDICT_TRIBUNAL_ROOM_ID": room_id})
+
+    print("=" * 55)
+    print("Agents registered on Band. Next steps:\n")
+    print("  1. Start all 4 agents (separate terminals) — they connect over WebSocket:")
+    print("       python -m juro.agents.advocate")
+    print("       python -m juro.agents.scrutinizer")
+    print("       python -m juro.agents.evidence")
+    print("       python -m juro.agents.adjudicator")
+    if room_id:
+        print("  2. Submit a case:")
+        print("       python -m juro.band_runner case")
+    else:
+        print("  2. In the Band web app (https://app.band.ai): create a room named")
+        print("     'Tribunal', add all four agents, then paste a case brief and")
+        print("     @mention Adjudicator. (Get a brief with: python -m juro.band_runner brief)")
+    print("  3. Watch the debate at https://app.band.ai")
+    print("  4. When the Adjudicator asks, reply OVERTURN or UPHOLD in the room.\n")
+
+
+# ============================================================================
+# CASE — submit the denied claim into the tribunal room
+# ============================================================================
+
+async def cmd_case() -> None:
+    _load_env()
+    room_id = os.environ.get("VERDICT_TRIBUNAL_ROOM_ID", "")
+    if not room_id:
+        raise SystemExit("VERDICT_TRIBUNAL_ROOM_ID not set — run `python -m juro.band_runner setup` first.")
+
+    case_id = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_CASE_ID
+    brief = _build_case_brief(case_id)
+    claim_id = CASES[case_id]["case"]["claimId"]
+
+    print(f"Submitting case {case_id} ({claim_id}) to tribunal room {room_id}…")
+    api = _get_api()
+    async with api:
+        await api.send_message(room_id, brief, mentions=["Adjudicator"])
+    print("Case submitted. The Adjudicator will convene the panel.")
+    print("Watch the debate at https://app.band.ai")
+
+
+# ============================================================================
+# EXPORT — fetch room messages → transcript.json for the cinematic UI
+# ============================================================================
+
+from juro.roles import TURN_PLAN as _TURN_PLAN
+
+_ROLE_MAP = {
+    "advocate": "advocate",
+    "scrutinizer": "scrutinizer",
+    "evidence": "evidence",
+    "adjudicator": "adjudicator",
+}
+
+_KIND_SEQUENCE = [k for _, k in _TURN_PLAN]
+
+
+def _agent_from_sender(sender_name: str) -> str | None:
+    lower = sender_name.lower()
+    for key in _ROLE_MAP:
+        if key in lower:
+            return _ROLE_MAP[key]
+    return None
+
+
+async def cmd_export() -> None:
+    _load_env()
+    room_id = os.environ.get("VERDICT_TRIBUNAL_ROOM_ID", "")
+    if not room_id:
+        raise SystemExit("VERDICT_TRIBUNAL_ROOM_ID not set.")
+
+    import httpx
+    api_key = _user_api_key()
+    base_url = _rest_url()
+
+    print(f"Fetching messages from tribunal room {room_id}…")
+    async with httpx.AsyncClient(
+        base_url=base_url,
+        headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+        timeout=30.0,
+    ) as client:
+        r = await client.get(f"/api/v1/me/chats/{room_id}/messages")
+        r.raise_for_status()
+        data = r.json()
+
+    messages = data.get("data", [])
+    if isinstance(messages, dict):
+        messages = messages.get("messages", messages.get("data", []))
+    if not isinstance(messages, list):
+        messages = []
+    if not messages:
+        raise SystemExit("No messages found in the tribunal room. Run a case first.")
+
+    from juro.transcript import EvidenceItem, Turn, build_transcript, estimate_duration, save_transcript
+    from juro.generate import CASE, EVIDENCE
+
+    turns: list[Turn] = []
+    kind_idx = 0
+    verdict_data = None
+
+    for msg in messages:
+        sender = msg.get("sender", {}).get("name", "") or msg.get("sender_name", "") or ""
+        content = msg.get("content", "") or ""
+        if not content.strip():
+            continue
+
+        agent = _agent_from_sender(sender)
+        if agent is None:
+            stripped = content.strip().upper()
+            if stripped in ("OVERTURN", "UPHOLD", "OVERTURNED", "UPHELD"):
+                decision = "OVERTURNED" if "OVERTURN" in stripped else "UPHELD"
+                verdict_data = {
+                    "decision": decision,
+                    "rationale": content.strip(),
+                    "by": sender or "Human Reviewer",
+                    "confidence": 0.90,
+                }
+            continue
+
+        if kind_idx < len(_TURN_PLAN) and _TURN_PLAN[kind_idx][0] == agent:
+            kind = _TURN_PLAN[kind_idx][1]
+            kind_idx += 1
+        else:
+            kind = "argument"
+
+        refs = []
+        for ev in EVIDENCE:
+            if ev.id in content:
+                refs.append(ev.id)
+
+        addressed = None
+        for name in ("advocate", "scrutinizer", "evidence", "adjudicator", "human"):
+            if f"@{name.capitalize()}" in content or f"@{name}" in content:
+                addressed = name
+                break
+
+        turns.append(Turn(
+            id=f"t{len(turns) + 1}",
+            agent=agent,
+            type=kind,
+            text=content.strip(),
+            durationMs=estimate_duration(content),
+            addressedTo=addressed,
+            evidenceRefs=refs,
+        ))
+
+    if not turns:
+        raise SystemExit("No agent messages found in the room.")
+
+    if verdict_data is None:
+        verdict_data = {
+            "decision": "PENDING",
+            "rationale": "Human verdict not yet delivered.",
+            "by": "—",
+            "confidence": 0.0,
+        }
+
+    transcript = build_transcript(CASE, EVIDENCE, turns, verdict_data)
+    os.makedirs(os.path.dirname(_TRANSCRIPT_OUT), exist_ok=True)
+    save_transcript(transcript, _TRANSCRIPT_OUT)
+    print(f"\n✓ Exported {len(turns)} turns → {_TRANSCRIPT_OUT}")
+    print(f"  Juro: {verdict_data['decision']}")
+    print(f"  Audit root: {transcript['auditRoot']}")
+    print("  Reload the web app to play this Band-sourced debate.")
+
+
+# ============================================================================
+# TEARDOWN — delete registered agents
+# ============================================================================
+
+async def cmd_teardown() -> None:
+    _load_env()
+    if not os.path.exists(_AGENT_CONFIG_PATH):
+        print("No agent_config.yaml found — nothing to tear down.")
+        return
+
+    with open(_AGENT_CONFIG_PATH) as f:
+        cfg = yaml.safe_load(f) or {}
+
+    api = _get_api()
+    async with api:
+        for role, data in (cfg.get("agents", {}) or {}).items():
+            aid = data.get("agent_id")
+            if not aid:
+                continue
+            try:
+                await api.delete_agent(aid, force=True)
+                print(f"  Deleted {role} ({aid})")
+            except Exception as e:
+                print(f"  Could not delete {role} ({aid}): {e}")
+    print("Teardown complete. Delete the room from the Band UI if desired.")
+
+
+# ============================================================================
+# CLI
+# ============================================================================
+
+async def cmd_brief() -> None:
+    """Print a case brief to paste into a Band-web-app room (Enterprise-free path)."""
+    case_id = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_CASE_ID
+    print(_build_case_brief(case_id))
+
+
+COMMANDS = {
+    "setup": cmd_setup,
+    "case": cmd_case,
+    "brief": cmd_brief,
+    "export": cmd_export,
+    "teardown": cmd_teardown,
+}
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd not in COMMANDS:
+        print(f"Usage: python -m juro.band_runner <{'|'.join(COMMANDS)}>")
+        print("\n  setup     Register agents (+ create the room if your plan allows)")
+        print("  case [id] Submit a denied claim into the room (id: mri-erisa|pet-oncology|snf-jimmo)")
+        print("  brief [id] Print a case brief to paste into a Band-web-app room")
+        print("  export    Fetch room messages → web/public/transcript.json")
+        print("  teardown  Delete registered agents from Band")
+        sys.exit(1)
+    asyncio.run(COMMANDS[cmd]())
+
+
+if __name__ == "__main__":
+    main()

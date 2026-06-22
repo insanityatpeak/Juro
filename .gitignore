@@ -1,0 +1,30 @@
+# dependencies / build output
+node_modules/
+.next/
+out/
+dist/
+build/
+.vercel/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# secrets and local config (never commit)
+.env
+.env.*
+!.env.example
+agent_config.yaml
+!agent_config.yaml.example
+
+# generated at runtime
+web/public/transcript.json
+
+# os / editor
+.DS_Store
+Thumbs.db
+*.log

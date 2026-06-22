@@ -1,0 +1,229 @@
+@import "tailwindcss";
+
+/* ============================================================
+   Juro tokens.
+   • DARK (console)  — the working instrument, untouched
+   • COURT RECORD (landing) — ink ⇄ paper duotone. Brass is
+     RESERVED for the ruling/CTA. Oxblood = the denied state.
+     Printed-paper grain keeps paper from reading as flat cream.
+   ============================================================ */
+:root {
+  /* —— dark console —— */
+  --ink: #0e1116;
+  --ink-2: #151a21;
+  --ink-3: #1a212b;
+  --paper-d: #f7f6f3;
+  --line: #232831;
+  --line-2: #2c333e;
+  --fg: #e7e9ec;
+  --muted: #8a929e;
+  --faint: #5b636f;
+  --blue: #3b5bdb;
+  --blue-2: #5a77e8;
+  --for: #3e7c8c;
+  --for-fg: #84b8c4;
+  --against: #b98a3e;
+  --against-fg: #d8b577;
+  --positive: #43d6a0;
+  --caution: #c2410c;
+
+  /* —— court record (landing) —— */
+  --c-ink: #16202e; /* ink-navy ground */
+  --c-ink-2: #1f2b3a; /* raised on ink */
+  --c-ink-line: #2c3a4b; /* hairline on ink */
+  --c-paper: #e9e2d3; /* aged paper ground */
+  --c-paper-2: #f3eee2; /* lightest paper */
+  --c-paper-line: #d3c9b4; /* hairline on paper */
+  --c-brass: #b8863a; /* THE verdict color — reserved */
+  --c-brass-2: #cb9a4a;
+  --c-oxblood: #7a2e2a; /* the denied / against state */
+  --c-slate: #5c6675; /* muted text on paper */
+  --c-ink-soft: #33414f; /* secondary ink text on paper */
+  --c-chalk: #dde1e7; /* text on ink ground */
+  --c-chalk-dim: #97a1ad; /* muted text on ink */
+}
+
+@theme inline {
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-paper-d: var(--paper-d);
+  --color-line: var(--line);
+  --color-line-2: var(--line-2);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-blue: var(--blue);
+  --color-blue-2: var(--blue-2);
+  --color-for: var(--for);
+  --color-for-fg: var(--for-fg);
+  --color-against: var(--against);
+  --color-against-fg: var(--against-fg);
+  --color-positive: var(--positive);
+  --color-caution: var(--caution);
+
+  --color-cink: var(--c-ink);
+  --color-cink2: var(--c-ink-2);
+  --color-cinkline: var(--c-ink-line);
+  --color-cpaper: var(--c-paper);
+  --color-cpaper2: var(--c-paper-2);
+  --color-cpaperline: var(--c-paper-line);
+  --color-cbrass: var(--c-brass);
+  --color-cbrass2: var(--c-brass-2);
+  --color-coxblood: var(--c-oxblood);
+  --color-cslate: var(--c-slate);
+  --color-cinksoft: var(--c-ink-soft);
+  --color-cchalk: var(--c-chalk);
+  --color-cchalkdim: var(--c-chalk-dim);
+
+  --font-display: var(--font-display);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+html,
+body {
+  background: var(--c-paper);
+  color: var(--c-ink);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* type registers */
+.display {
+  font-family: var(--font-display), ui-serif, Georgia, serif;
+  font-weight: 420;
+  letter-spacing: -0.018em;
+  font-variation-settings: "opsz" 144, "SOFT" 0, "WONK" 0;
+}
+.display-soft {
+  font-variation-settings: "opsz" 144, "SOFT" 55, "WONK" 0;
+}
+.mono {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.keb {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  font-size: 11px;
+}
+
+/* printed-paper grain — the texture that kills the flat-cream look */
+.grain {
+  position: relative;
+  isolation: isolate;
+}
+.grain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.05;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+.grain-ink::after {
+  mix-blend-mode: screen;
+  opacity: 0.045;
+}
+
+/* —— console helpers (dark) —— */
+.panel {
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.hairline {
+  border: 1px solid var(--line);
+}
+.eyebrow {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 11px;
+  color: var(--muted);
+}
+.cite {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 11px;
+  border: 1px solid var(--line-2);
+  border-radius: 2px;
+  padding: 1px 6px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* —— premium buttons —— */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  font-weight: 500;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0.8rem 1.3rem;
+  border-radius: 2px; /* sharp — judicial, not pill */
+  transition:
+    background 0.18s ease,
+    color 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
+  cursor: pointer;
+  user-select: none;
+}
+.btn-brass {
+  background: var(--c-brass);
+  color: #1b1206;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.15);
+}
+.btn-brass:hover {
+  background: var(--c-brass-2);
+}
+.btn-line-ink {
+  background: transparent;
+  color: var(--c-chalk);
+  border: 1px solid var(--c-chalk-dim);
+}
+.btn-line-ink:hover {
+  border-color: var(--c-chalk);
+}
+.btn-line-paper {
+  background: transparent;
+  color: var(--c-ink);
+  border: 1px solid var(--c-paper-line);
+}
+.btn-line-paper:hover {
+  border-color: var(--c-ink);
+}
+.btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-brass) 40%, transparent);
+}
+
+.scroll-fade::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+.scroll-fade::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--c-slate) 40%, transparent);
+  border-radius: 99px;
+}
+.scroll-fade::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--c-brass) 30%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
