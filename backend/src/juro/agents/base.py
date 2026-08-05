@@ -12,7 +12,6 @@ a turn still posts even if the model returns a plain answer instead of a tool ca
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from abc import ABC, abstractmethod

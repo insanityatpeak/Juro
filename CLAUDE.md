@@ -11,7 +11,14 @@ The repo has two independent halves that both produce the same output shape (a *
 - `web/` — Next.js 16 app. The landing page and the **Chamber** (`/chamber`), which runs a *live* cross-model debate entirely inside a Next.js API route by calling the Anthropic API directly (no Band dependency). This is what the deployed demo uses.
 - `backend/` — Python. The **Band tribunal runtime**: the same four roles run as separate OS processes, each its own Band agent connected over WebSocket to one shared room, coordinating by `@mentioning` each other. This is the actual multi-agent (Band) submission path.
 
-These two paths are deliberately kept in sync by sharing role prompts/turn order conceptually (`web/src/lib/roles.ts` mirrors `backend/src/juro/roles.py`), but they are separately implemented — changes to the debate flow or prompts usually need to be made in **both** places.
+These two paths are deliberately kept in sync by sharing role prompts/turn order conceptually (`web/src/lib/roles.ts` mirrors `backend/src/juro/roles.py`), but they are separately implemented — changes to the debate flow or prompts usually need to be made in **both** places. The pairs to check whenever you touch either side:
+
+| Concern | Python | TypeScript |
+|---|---|---|
+| Role prompts / turn order | `backend/src/juro/roles.py` | `web/src/lib/roles.ts` |
+| Case data | `backend/src/juro/cases.py` | `web/src/data/cases.ts` |
+| Transcript schema | `backend/src/juro/transcript.py` | `web/src/lib/types.ts` |
+| Debate generation loop | `backend/src/juro/generate.py` | `web/src/app/api/hearing/route.ts` |
 
 ## Commands
 
@@ -46,9 +53,11 @@ python -m juro.generate      # local debate generator (Anthropic-only, no Band n
 ```
 The Band SDK pins a private git submodule pip can't clone directly — install it from a no-submodule clone (see README "Getting started" section) rather than the plain PyPI/git spec.
 
+`python -m juro.generate` needs `ANTHROPIC_API_KEY` in `backend/.env`; the Band commands (`setup`, `case`, `export`, `teardown`, and each `agents/*.py` process) additionally need `THENVOI_API_KEY` (plus `THENVOI_REST_URL`/`THENVOI_WS_URL`, which default to Band's hosted instance) — see `backend/.env.example`.
+
 Case ids: `mri-erisa`, `pet-oncology`, `snf-jimmo` (defined in `backend/src/juro/cases.py`).
 
-No test suite currently exists in either half despite `pytest`/`pytest-asyncio` being listed as backend dev dependencies.
+No test suite currently exists in either half despite `pytest`/`pytest-asyncio` being listed as backend dev dependencies. To sanity-check a change, run it end-to-end and inspect the output: `python -m juro.generate` for the local/Chamber path (check the resulting transcript JSON and that `auditRoot` still validates), or start all four `agents/*.py` processes plus `band_runner case`/`export` for the Band relay path.
 
 ## Architecture
 
@@ -78,5 +87,8 @@ The three debaters (`advocate`, `scrutinizer`, `evidence`) run on a fast/light m
 ### Case data lives in two places
 `backend/src/juro/cases.py` (Python, used by `band_runner.py`/`generate.py`) and `web/src/data/cases.ts` (TS, used by the Chamber's `/api/hearing` route) both define the same sample cases (claim, evidence, denial reason). Adding or editing a case means updating both.
 
+### Voice playback (Chamber only)
+`web/src/app/api/speak/route.ts` and `web/src/lib/useVoice.ts` add spoken playback of turns in the Chamber UI via Deepgram TTS (`DEEPGRAM_API_KEY`). This is presentation-layer only — it consumes the same transcript shape and has no equivalent on the Band side, since the Band runtime just posts text to a room.
+
 ### Config/credentials flow (Band path only)
-`band_runner.py setup` registers 4 agents via Band's REST API, writes their id/api_key to `backend/agent_config.yaml` (gitignored) and appends `VERDICT_TRIBUNAL_ROOM_ID` to `backend/.env`. Each agent process (`agents/advocate.py` etc.) reads its own credentials out of `agent_config.yaml` via `_load_agent_creds()` in `base.py`. Room creation over REST requires an Enterprise Band plan; on a normal account it 403s and the room must be created manually in the Band web app instead (`setup` detects this and prints fallback instructions).
+`band_runner.py setup` registers 4 agents via Band's REST API, writes their id/api_key to `backend/agent_config.yaml` (gitignored) and appends `VERDICT_TRIBUNAL_ROOM_ID` to `backend/.env`. `band_runner.py case [case_id]` similarly appends `VERDICT_CASE_ID` after a successful submit, so `export` later knows which of the 3 sample cases' `case`/`evidence` data to pair with the room's turns (it doesn't otherwise appear anywhere in the room transcript). Each agent process (`agents/advocate.py` etc.) reads its own credentials out of `agent_config.yaml` via `_load_agent_creds()` in `base.py`. The actual HTTP calls (register agent, create room, add participant, send message) live in `band_api.py`, a thin async wrapper over Band's Human API. Room creation over REST requires an Enterprise Band plan; on a normal account it 403s and the room must be created manually in the Band web app instead (`setup` detects this and prints fallback instructions).

@@ -18,7 +18,6 @@ Architecture difference from Quorum:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import sys
@@ -242,6 +241,7 @@ async def cmd_case() -> None:
     api = _get_api()
     async with api:
         await api.send_message(room_id, brief, mentions=["Adjudicator"])
+    _append_env({"VERDICT_CASE_ID": case_id})
     print("Case submitted. The Adjudicator will convene the panel.")
     print("Watch the debate at https://app.band.ai")
 
@@ -298,8 +298,14 @@ async def cmd_export() -> None:
     if not messages:
         raise SystemExit("No messages found in the tribunal room. Run a case first.")
 
-    from juro.transcript import EvidenceItem, Turn, build_transcript, estimate_duration, save_transcript
-    from juro.generate import CASE, EVIDENCE
+    from juro.transcript import Turn, build_transcript, estimate_duration, save_transcript
+    from juro.generate import _evidence_from_case
+
+    case_id = os.environ.get("VERDICT_CASE_ID", DEFAULT_CASE_ID)
+    if case_id not in CASES:
+        raise SystemExit(f"Unknown case id '{case_id}' in VERDICT_CASE_ID. Choose one of: {', '.join(CASES)}")
+    CASE = dict(CASES[case_id]["case"])
+    EVIDENCE = _evidence_from_case(case_id)
 
     turns: list[Turn] = []
     kind_idx = 0

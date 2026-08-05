@@ -147,8 +147,14 @@ function ThinkingRow({ agent }: { agent: Faction }) {
   const m = SEAT_META[agent];
   const stages = THINK_STAGES[agent];
   const [step, setStep] = useState(0);
-  useEffect(() => {
+  // ThinkingRow is reused across agents (fixed key), so reset step during
+  // render when the agent changes rather than one tick later in an effect.
+  const [prevAgent, setPrevAgent] = useState(agent);
+  if (agent !== prevAgent) {
+    setPrevAgent(agent);
     setStep(0);
+  }
+  useEffect(() => {
     const id = setInterval(() => setStep((s) => Math.min(s + 1, stages.length - 1)), 850);
     return () => clearInterval(id);
   }, [agent, stages.length]);

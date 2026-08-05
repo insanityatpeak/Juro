@@ -6,7 +6,7 @@ import { sampleTranscript } from "@/data/sample-transcript";
 
 /**
  * Prefer a generated debate (web/public/transcript.json, written by
- * `python -m verdict.generate`) and fall back to the bundled sample — so a fresh
+ * `python -m juro.generate`) and fall back to the bundled sample — so a fresh
  * clone always has a flawless demo, and a real run upgrades it automatically.
  */
 export function useTranscript(): Transcript {

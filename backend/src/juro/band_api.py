@@ -47,7 +47,8 @@ class BandHumanAPI:
             payload["agent"]["description"] = description
         r = await self._client.post("/api/v1/me/agents/register", json=payload)
         r.raise_for_status()
-        result = r.json().get("data", r.json())
+        body = r.json()
+        result = body.get("data", body)
         if not result.get("credentials", {}).get("api_key"):
             logger.warning("No api_key returned for %s — check API version.", name)
         return result
@@ -60,7 +61,8 @@ class BandHumanAPI:
     async def list_agents(self) -> list[dict]:
         r = await self._client.get("/api/v1/me/agents")
         r.raise_for_status()
-        data = r.json().get("data", r.json())
+        body = r.json()
+        data = body.get("data", body)
         return data if isinstance(data, list) else ([data] if data else [])
 
     # -- rooms -----------------------------------------------------------------
@@ -69,7 +71,8 @@ class BandHumanAPI:
         """Create a chat room (the platform auto-titles from first message)."""
         r = await self._client.post("/api/v1/me/chats", json={"chat": {}})
         r.raise_for_status()
-        room = r.json().get("data", r.json())
+        body = r.json()
+        room = body.get("data", body)
         logger.info("Room created: id=%s%s", room.get("id", "?"), f" ({title})" if title else "")
         return room
 
@@ -79,7 +82,8 @@ class BandHumanAPI:
             json={"participant": {"participant_id": participant_id, "role": role}},
         )
         r.raise_for_status()
-        return r.json().get("data", r.json())
+        body = r.json()
+        return body.get("data", body)
 
     async def send_message(self, chat_id: str, content: str, mentions: list[str] | None = None) -> dict:
         """Post a message into a room as the human user (used to inject a case)."""
@@ -88,4 +92,5 @@ class BandHumanAPI:
             payload["message"]["mentions"] = mentions
         r = await self._client.post(f"/api/v1/me/chats/{chat_id}/messages", json=payload)
         r.raise_for_status()
-        return r.json().get("data", r.json())
+        body = r.json()
+        return body.get("data", body)

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { motion, useInView, useScroll, useTransform, type MotionValue } from "motion/react";
 import NumberFlow from "@number-flow/react";
 import { Magnetic, Reveal, SmoothScroll, VerdictStamp } from "@/components/motion";
@@ -108,10 +108,7 @@ function CountUp({ to, suffix = "", prefix = "" }: { to: number; suffix?: string
   // and it animates ON SCROLL into view (not on load) without the old -25% margin
   // that left it stuck at 0.
   const inView = useInView(ref, { once: true, amount: 0.5 });
-  const [v, setV] = useState(0);
-  useEffect(() => {
-    if (inView) setV(to);
-  }, [inView, to]);
+  const v = inView ? to : 0;
   return (
     <span ref={ref} className="tabular-nums">
       {prefix}
@@ -132,10 +129,6 @@ function OverturnChart() {
   const ref = useRef<HTMLDivElement>(null);
   // Fires when 35% of the chart is visible — animates on scroll into view.
   const inView = useInView(ref, { once: true, amount: 0.35 });
-  const [show, setShow] = useState(false);
-  useEffect(() => {
-    if (inView) setShow(true);
-  }, [inView]);
   return (
     <div ref={ref} className="flex flex-col gap-5">
       {OVERTURN.map((b, i) => (
@@ -150,7 +143,7 @@ function OverturnChart() {
                 className="h-full"
                 style={{ background: "var(--c-brass)" }}
                 initial={{ width: 0 }}
-                animate={show ? { width: `${b.rate}%` } : { width: 0 }}
+                animate={inView ? { width: `${b.rate}%` } : { width: 0 }}
                 transition={{ duration: 1, delay: i * 0.12, ease: [0.16, 1, 0.3, 1] }}
               />
             </div>
@@ -168,7 +161,7 @@ function TheScale() {
       <div className="mx-auto max-w-[1400px] px-6 py-28 md:px-10 md:py-40">
         <div className="mb-12 flex items-baseline justify-between border-b border-cpaperline pb-4">
           <span className="keb text-cslate">The scale</span>
-          <span className="mono text-[11px] text-cslate">// 01</span>
+          <span className="mono text-[11px] text-cslate">{"// 01"}</span>
         </div>
         <div className="grid gap-14 md:grid-cols-[0.95fr_1.05fr] md:items-center">
           <div>
@@ -239,7 +232,7 @@ function HowItWorks() {
       <div className="mx-auto grid max-w-[1400px] gap-0 px-6 md:grid-cols-2 md:px-10">
         {/* sticky diagram */}
         <div className="sticky top-0 hidden h-screen flex-col justify-center md:flex">
-          <div className="keb mb-8 text-cbrass">// 03 · How the tribunal works</div>
+          <div className="keb mb-8 text-cbrass">{"// 03 · How the tribunal works"}</div>
           <svg viewBox="0 0 360 360" className="w-full max-w-[440px]">
             <motion.line x1="120" y1="80" x2="220" y2="180" stroke="var(--c-brass)" strokeWidth="1.5" style={{ pathLength: e1 }} />
             <motion.line x1="120" y1="280" x2="220" y2="180" stroke="var(--c-oxblood)" strokeWidth="1.5" style={{ pathLength: e2 }} />
@@ -258,7 +251,7 @@ function HowItWorks() {
 
         {/* scrolling steps */}
         <div className="py-[18vh] md:py-[24vh]">
-          <div className="keb mb-10 text-cbrass md:hidden">// 03 · How the tribunal works</div>
+          <div className="keb mb-10 text-cbrass md:hidden">{"// 03 · How the tribunal works"}</div>
           <div className="space-y-[16vh]">
             {STEPS.map((s) => (
               <motion.div
@@ -306,6 +299,9 @@ function DemoSection() {
       const t = setTimeout(() => pb.start(), 2800);
       return () => clearTimeout(t);
     }
+    // pb is a fresh object every render; phase/start are the actual reactive
+    // values and depending on pb itself would re-fire this every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pb.phase, pb.start]);
   const revealed = pb.phase === "idle" ? tx.turns.slice(0, 1) : pb.phase === "debate" ? tx.turns.slice(0, pb.index + 1) : tx.turns;
   return (
@@ -313,7 +309,7 @@ function DemoSection() {
       <div className="mx-auto max-w-[1100px] px-6 py-28 md:px-10 md:py-40">
         <div className="mb-10 flex items-end justify-between border-b border-cinkline pb-4">
           <div>
-            <div className="keb mb-3 text-cbrass">// 04 · In session</div>
+            <div className="keb mb-3 text-cbrass">{"// 04 · In session"}</div>
             <h2 className="display text-[34px] leading-tight text-cchalk md:text-[52px]">See a denial argued.</h2>
           </div>
           <span className="mono flex items-center gap-2 text-[11px] text-cchalkdim">
@@ -386,7 +382,7 @@ function WhatHappened() {
       <div className="mx-auto max-w-[1400px] px-6 py-28 md:px-10 md:py-40">
         <div className="mb-4 flex items-baseline justify-between border-b border-cinkline pb-4">
           <h2 className="display text-[34px] leading-tight text-cchalk md:text-[52px]">This already happened.</h2>
-          <span className="mono text-[11px] text-cchalkdim">// 02</span>
+          <span className="mono text-[11px] text-cchalkdim">{"// 02"}</span>
         </div>
         <p className="mb-12 max-w-xl text-[15px] leading-relaxed text-cchalkdim">
           Real people, real denials, on three continents. Each one was a single rule away from a
@@ -452,13 +448,13 @@ function HowItFits() {
       <div className="mx-auto max-w-[1400px] px-6 py-28 md:px-10 md:py-40">
         <div className="mb-4 flex items-baseline justify-between border-b border-cpaperline pb-4">
           <h2 className="display text-[34px] leading-tight text-cink md:text-[52px]">How it fits.</h2>
-          <span className="mono text-[11px] text-cslate">// 05</span>
+          <span className="mono text-[11px] text-cslate">{"// 05"}</span>
         </div>
         <p className="mb-14 max-w-xl text-[15px] leading-relaxed text-cslate">
           Today, fewer than 1% of denials are ever appealed. Of the ones that are filed, about a
-          third get overturned. The gap isn't whether people are right. It's whether anyone has the
+          third get overturned. The gap isn&apos;t whether people are right. It&apos;s whether anyone has the
           time to argue. Juro closes the distance from months to minutes. And this is not a one-click
-          appeal letter. It's a full hearing, both sides argued and on the record, which is what holds
+          appeal letter. It&apos;s a full hearing, both sides argued and on the record, which is what holds
           up when a decision is contested.
         </p>
         <div className="grid gap-x-12 gap-y-12 md:grid-cols-2">
@@ -510,7 +506,7 @@ function LawIndex() {
       <div className="mx-auto max-w-[1400px] px-6 py-28 md:px-10 md:py-36">
         <div className="mb-2 flex items-baseline justify-between">
           <h2 className="display text-[34px] leading-tight text-cink md:text-[52px]">Grounded in real law.</h2>
-          <span className="mono text-[11px] text-cslate">// 06</span>
+          <span className="mono text-[11px] text-cslate">{"// 06"}</span>
         </div>
         <p className="mb-12 max-w-md text-[15px] text-cslate">
           A challenge isn&apos;t a plea. It&apos;s an assertion of a right you already hold. Every
@@ -554,7 +550,7 @@ function Expand() {
           <h2 className="display max-w-[18ch] text-[30px] leading-tight text-cchalk md:text-[46px]">
             The same tribunal, wherever a rulebook meets a backlog.
           </h2>
-          <span className="mono text-[11px] text-cchalkdim">// 09</span>
+          <span className="mono text-[11px] text-cchalkdim">{"// 09"}</span>
         </div>
         <p className="mb-12 max-w-2xl text-[15px] leading-relaxed text-cchalkdim">
           Health insurance is the wedge, because the rules are already written down. The wedge alone
@@ -618,7 +614,7 @@ function BuiltOnBand() {
       <div className="mx-auto max-w-[1400px] px-6 py-28 md:px-10 md:py-40">
         <div className="mb-10 flex items-baseline justify-between border-b border-cinkline pb-4">
           <h2 className="display text-[34px] leading-tight text-cchalk md:text-[52px]">Built on Band.</h2>
-          <span className="mono text-[11px] text-cchalkdim">// 07</span>
+          <span className="mono text-[11px] text-cchalkdim">{"// 07"}</span>
         </div>
         <div className="grid gap-14 md:grid-cols-[1fr_0.85fr]">
           <div>
@@ -682,7 +678,7 @@ function Provenance() {
       <div className="mx-auto max-w-[1400px] px-6 py-28 md:px-10 md:py-40">
         <div className="mb-4 flex items-baseline justify-between border-b border-cpaperline pb-4">
           <h2 className="display text-[34px] leading-tight text-cink md:text-[52px]">Built to hold up.</h2>
-          <span className="mono text-[11px] text-cslate">// 08</span>
+          <span className="mono text-[11px] text-cslate">{"// 08"}</span>
         </div>
         <p className="mb-14 max-w-xl text-[15px] leading-relaxed text-cslate">
           A tribunal is only worth trusting if it runs cleanly and can&apos;t be quietly rewritten. We

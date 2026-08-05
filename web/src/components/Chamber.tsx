@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { HearingTranscript } from "@/components/HearingTranscript";
 import { CASES } from "@/data/cases";
@@ -90,7 +90,9 @@ function Hearing({ entry, onBack }: { entry: CaseEntry; onBack: () => void }) {
   // its audio to finish before the next, so reply and speech stay in lockstep.
   // A ref lets the player read the *current* Listen state without re-subscribing.
   const listenRef = useRef(listen);
-  listenRef.current = listen;
+  useEffect(() => {
+    listenRef.current = listen;
+  }, [listen]);
   const pb = useLiveHearing(entry, {
     speak: voice.speak,
     isListening: () => listenRef.current,

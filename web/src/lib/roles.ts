@@ -12,6 +12,7 @@ export const TURN_PLAN: [Role, string][] = [
   ["advocate", "rebuttal"],
   ["adjudicator", "question"],
   ["evidence", "evidence"],
+  ["scrutinizer", "argument"],
   ["adjudicator", "ruling"],
 ];
 
