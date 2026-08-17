@@ -6,7 +6,7 @@
 
 An adversarial AI tribunal for denied health-insurance claims. Four agents argue a denial in one shared room on **Band**, a human delivers the binding ruling, and every line is hash-chained so the record can't be quietly changed.
 
-[**Live demo →**](https://juro-roan.vercel.app) · [The Chamber →](https://juro-roan.vercel.app/chamber) · [**Yt Explained →**]([https://juro-roan.vercel.app](https://www.youtube.com/watch?v=N3ys8yAu0Vw))
+[**Live demo →**](https://juro-roan.vercel.app) · [The Chamber →](https://juro-roan.vercel.app/chamber) · [**Yt Explained →**](https://www.youtube.com/watch?v=N3ys8yAu0Vw)
 
 `Band of Agents Hackathon` · `Track 3 — Regulated & High-Stakes Workflows` · `MIT`
 
