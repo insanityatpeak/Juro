@@ -1,6 +1,7 @@
 <div align="center">
 
-# ⚖️ Juro
+# <img width="160" height="160" alt="image" src="https://github.com/user-attachments/assets/6c227ac8-6a35-4488-ab14-e8dfcdfe7f5d" />
+ Juro
 
 ### Both sides heard. One ruling.
 
