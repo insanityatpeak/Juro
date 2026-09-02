@@ -60,20 +60,13 @@ def _select_case(case_id: str | None) -> tuple[str, dict, list[EvidenceItem]]:
     return cid, dict(CASES[cid]["case"]), _evidence_from_case(cid)
 
 
-# ---- the case under review (the denial the tribunal will argue) -------------
-# Defaults to the MRI/ERISA case; main() rebuilds these from an argv case id.
-CASE_ID = DEFAULT_CASE_ID
-CASE = dict(CASES[CASE_ID]["case"])
-EVIDENCE = _evidence_from_case(CASE_ID)
-
-
-def _case_brief() -> str:
-    ev = "\n".join(f"  {e.id} [{e.kind}] {e.label}: {e.detail} (cite {e.cite})" for e in EVIDENCE)
+def _case_brief(case: dict, evidence: list[EvidenceItem]) -> str:
+    ev = "\n".join(f"  {e.id} [{e.kind}] {e.label}: {e.detail} (cite {e.cite})" for e in evidence)
     return (
-        f"CLAIM {CASE['claimId']} — {CASE['patient']}\n"
-        f"Procedure: {CASE['procedure']} ({CASE['amount']})\n"
-        f"Insurer: {CASE['insurer']}\n"
-        f"DENIAL: {CASE['denialReason']}\n\nEVIDENCE ON THE RECORD:\n{ev}"
+        f"CLAIM {case['claimId']} — {case['patient']}\n"
+        f"Procedure: {case['procedure']} ({case['amount']})\n"
+        f"Insurer: {case['insurer']}\n"
+        f"DENIAL: {case['denialReason']}\n\nEVIDENCE ON THE RECORD:\n{ev}"
     )
 
 
@@ -83,10 +76,17 @@ def _transcript_so_far(turns: list[Turn]) -> str:
     return "\n".join(f"{t.agent.upper()}: {t.text}" for t in turns)
 
 
-def _ask(client: anthropic.Anthropic, role: str, kind: str, turns: list[Turn]) -> dict:
-    valid_ids = ", ".join(e.id for e in EVIDENCE)
+def _ask(
+    client: anthropic.Anthropic,
+    role: str,
+    kind: str,
+    turns: list[Turn],
+    case: dict,
+    evidence: list[EvidenceItem],
+) -> dict:
+    valid_ids = ", ".join(e.id for e in evidence)
     user = (
-        f"{_case_brief()}\n\nDEBATE SO FAR:\n{_transcript_so_far(turns)}\n\n"
+        f"{_case_brief(case, evidence)}\n\nDEBATE SO FAR:\n{_transcript_so_far(turns)}\n\n"
         f"It is your turn ({role}, contribution type: {kind}). "
         f"Valid evidence ids: {valid_ids}.\n"
         'Respond ONLY with compact JSON: '
@@ -111,16 +111,16 @@ def _ask(client: anthropic.Anthropic, role: str, kind: str, turns: list[Turn]) -
     text = data.get("text")
     if not text:
         raise ValueError(f"LLM response missing 'text' for {role}/{kind}: {data}")
-    refs = [r for r in data.get("evidenceRefs", []) if r in {e.id for e in EVIDENCE}]
+    refs = [r for r in data.get("evidenceRefs", []) if r in {e.id for e in evidence}]
     addressed = data.get("addressedTo")
     if addressed in ("null", "", None):
         addressed = None
     return {"text": text.strip(), "addressedTo": addressed, "evidenceRefs": refs}
 
 
-def _final_verdict(client: anthropic.Anthropic, turns: list[Turn]) -> dict:
+def _final_verdict(client: anthropic.Anthropic, turns: list[Turn], case: dict, evidence: list[EvidenceItem]) -> dict:
     user = (
-        f"{_case_brief()}\n\nFULL DEBATE:\n{_transcript_so_far(turns)}\n\n"
+        f"{_case_brief(case, evidence)}\n\nFULL DEBATE:\n{_transcript_so_far(turns)}\n\n"
         "You are the human medical reviewer delivering the FINAL verdict. "
         'Respond ONLY with JSON: {"decision": "OVERTURNED|UPHELD", '
         '"rationale": "<one or two sentences>", "confidence": <0..1>}'
@@ -148,10 +148,9 @@ def _final_verdict(client: anthropic.Anthropic, turns: list[Turn]) -> dict:
 
 
 def main() -> None:
-    global CASE_ID, CASE, EVIDENCE
     requested = sys.argv[1] if len(sys.argv) > 1 else None
-    CASE_ID, CASE, EVIDENCE = _select_case(requested)
-    print(f"Generating debate for case: {CASE_ID}  ({CASE['claimId']} — {CASE['patient']})")
+    case_id, case, evidence = _select_case(requested)
+    print(f"Generating debate for case: {case_id}  ({case['claimId']} — {case['patient']})")
 
     _env = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".env")
     if os.path.exists(_env):
@@ -163,7 +162,7 @@ def main() -> None:
     turns: list[Turn] = []
     for i, (role, kind) in enumerate(TURN_PLAN, start=1):
         print(f"  [{i:>2}/{len(TURN_PLAN)}] {role} ({kind})…")
-        out = _ask(client, role, kind, turns)
+        out = _ask(client, role, kind, turns, case, evidence)
         turns.append(
             Turn(
                 id=f"t{i}",
@@ -176,8 +175,8 @@ def main() -> None:
             )
         )
 
-    verdict = _final_verdict(client, turns)
-    transcript = build_transcript(CASE, EVIDENCE, turns, verdict)
+    verdict = _final_verdict(client, turns, case, evidence)
+    transcript = build_transcript(case, evidence, turns, verdict)
 
     # Write where the front-end can fetch it (UI falls back to the bundled sample).
     here = os.path.dirname(os.path.abspath(__file__))

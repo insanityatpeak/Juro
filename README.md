@@ -126,14 +126,21 @@ npm install
 npm run dev          # http://localhost:3000
 ```
 
-The Chamber's live hearings and the agent voices need two keys in `web/.env.local`:
+The app ships with a bundled sample hearing, so a fresh clone runs at `localhost:3000` with **no keys at all** — the landing page and the Chamber both work off the sample transcript, just without live AI turns or spoken voices.
+
+To make hearings and voices live, create `web/.env.local` (gitignored) with:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...     # the agents' reasoning
 DEEPGRAM_API_KEY=...             # the agent voices
 ```
 
-The app ships with a bundled sample hearing, so a fresh clone runs without keys.
+| Key | Where to get it | Needed for |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/) → Settings → API Keys → Create Key (needs billing set up; pay-as-you-go, hearings are cheap on Haiku) | Live cross-model hearings (`/api/hearing`) |
+| `DEEPGRAM_API_KEY` | [console.deepgram.com](https://console.deepgram.com/) → sign up (free tier includes trial credit) → API Keys → Create a New API Key | Spoken agent voices (`/api/speak`) |
+
+Restart `npm run dev` after adding/changing `.env.local` — Next.js only reads it on startup.
 
 ### The Band tribunal
 

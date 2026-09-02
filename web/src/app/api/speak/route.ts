@@ -1,24 +1,18 @@
 import { NextRequest } from "next/server";
-
-// Distinct, warm Aura-2 voices per agent so the hearing is legible by ear alone
-// (two female / two male, different timbres).
-const VOICES: Record<string, string> = {
-  advocate: "aura-2-thalia-en", // warm, earnest counsel (for the patient)
-  scrutinizer: "aura-2-apollo-en", // measured, confident (uphold the denial)
-  evidence: "aura-2-cora-en", // smooth, caring, factual delivery
-  adjudicator: "aura-2-jupiter-en", // knowledgeable baritone chair
-  human: "aura-2-hera-en", // warm, professional reviewer
-};
+import { FACTION_META, type Faction } from "@/lib/types";
 
 // POST { text, agent } -> audio/mpeg. The Deepgram key stays server-side.
+// Voices are defined once in FACTION_META (lib/types.ts) — the single source
+// of truth also used client-side, so the two never drift apart.
 export async function POST(req: NextRequest) {
   const key = process.env.DEEPGRAM_API_KEY;
   if (!key) return new Response("no_key", { status: 503 });
 
-  const { text, agent } = (await req.json()) as { text?: string; agent?: string };
+  const { text, agent } = (await req.json().catch(() => ({}))) as { text?: string; agent?: string };
   if (!text) return new Response("no_text", { status: 400 });
 
-  const model = VOICES[agent ?? "human"] ?? "aura-2-athena-en";
+  const meta = FACTION_META[agent as Faction];
+  const model = meta?.voice ?? "aura-2-athena-en";
   const dg = await fetch(`https://api.deepgram.com/v1/speak?model=${model}`, {
     method: "POST",
     headers: { Authorization: `Token ${key}`, "Content-Type": "application/json" },

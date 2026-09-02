@@ -12,6 +12,7 @@ a turn still posts even if the model returns a plain answer instead of a tool ca
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -173,7 +174,18 @@ class VerdictAgent(ABC):
                 sender = (getattr(msg, "sender_name", "") or "").lower()
                 if "evidence" in sender:
                     human = await _human_name(tools)
-                    return [human] if human else ["Advocate"]
+                    if not human:
+                        # Don't silently loop the tribunal back to Advocate — that
+                        # would restart the debate instead of delivering the ruling.
+                        # Leave the mention unforced (fall back to whatever the
+                        # model itself chose) and log loudly so this is debuggable.
+                        logger.error(
+                            "[RELAY] Could not resolve the human reviewer to deliver "
+                            "the ruling to — leaving the mention unforced rather than "
+                            "restarting the tribunal at Advocate."
+                        )
+                        return []
+                    return [human]
                 return ["Advocate"]
             return []
 
@@ -182,6 +194,13 @@ class VerdictAgent(ABC):
                 super().__init__(*a, **kw)
                 self._sent_this_turn: dict[str, bool] = {}
                 self._final_text: dict[str, str] = {}
+                self._room_locks: dict[str, asyncio.Lock] = {}
+
+            def _lock_for(self, room_id: str) -> asyncio.Lock:
+                lock = self._room_locks.get(room_id)
+                if lock is None:
+                    lock = self._room_locks[room_id] = asyncio.Lock()
+                return lock
 
             async def _handle_stream_event(self, event, room_id, tools):
                 if isinstance(event, dict):
@@ -199,37 +218,42 @@ class VerdictAgent(ABC):
                 self, msg, tools, history, participants_msg, contacts_msg,
                 *, is_session_bootstrap, room_id,
             ):
-                self._sent_this_turn[room_id] = False
-                self._final_text[room_id] = ""
+                # Serialize per room: self._sent_this_turn[room_id] /
+                # self._final_text[room_id] are reset-then-read across this whole
+                # turn, so two messages for the same room arriving back-to-back
+                # must not interleave and clobber each other's in-flight state.
+                async with self._lock_for(room_id):
+                    self._sent_this_turn[room_id] = False
+                    self._final_text[room_id] = ""
 
-                forced = await _forced_mentions(msg, tools)
-                orig_send = tools.send_message
+                    forced = await _forced_mentions(msg, tools)
+                    orig_send = tools.send_message
 
-                async def _send(content, mentions=None):
-                    # Deterministic handoff: ignore the model's choice of mention.
-                    return await orig_send(content, mentions=forced or mentions)
+                    async def _send(content, mentions=None):
+                        # Deterministic handoff: ignore the model's choice of mention.
+                        return await orig_send(content, mentions=forced or mentions)
 
-                tools.send_message = _send  # execute_tool_call does getattr(self,"send_message")
-                try:
-                    result = await super().on_message(
-                        msg, tools, history, participants_msg, contacts_msg,
-                        is_session_bootstrap=is_session_bootstrap, room_id=room_id,
-                    )
-                finally:
-                    tools.send_message = orig_send
-
-                if not self._sent_this_turn.get(room_id) and self._final_text.get(room_id):
-                    text = self._final_text[room_id]
-                    logger.info(
-                        "[RELAY] %s gave a final answer without band_send_message; "
-                        "posting it (%d chars, -> %s) so the room is never left silent.",
-                        agent_label, len(text), forced or ["(none)"],
-                    )
+                    tools.send_message = _send  # execute_tool_call does getattr(self,"send_message")
                     try:
-                        await orig_send(text, mentions=forced or ["Adjudicator"])
-                    except Exception:
-                        logger.exception("[RELAY] fallback send_message failed")
-                return result
+                        result = await super().on_message(
+                            msg, tools, history, participants_msg, contacts_msg,
+                            is_session_bootstrap=is_session_bootstrap, room_id=room_id,
+                        )
+                    finally:
+                        tools.send_message = orig_send
+
+                    if not self._sent_this_turn.get(room_id) and self._final_text.get(room_id):
+                        text = self._final_text[room_id]
+                        logger.info(
+                            "[RELAY] %s gave a final answer without band_send_message; "
+                            "posting it (%d chars, -> %s) so the room is never left silent.",
+                            agent_label, len(text), forced or ["(none)"],
+                        )
+                        try:
+                            await orig_send(text, mentions=forced or ["Adjudicator"])
+                        except Exception:
+                            logger.exception("[RELAY] fallback send_message failed")
+                    return result
 
         return RelayLangGraphAdapter(
             llm=self._create_llm(),

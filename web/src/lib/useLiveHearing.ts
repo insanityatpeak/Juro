@@ -13,7 +13,8 @@ const READ_CAP = 6500; // when not listening, max time a turn stays before the n
 type Ev =
   | { type: "thinking"; agent: Faction }
   | { type: "turn"; turn: Turn }
-  | { type: "verdict"; verdict: Verdict };
+  | { type: "verdict"; verdict: Verdict }
+  | { type: "auditRoot"; auditRoot: string };
 
 /** Voice hooks the Chamber wires in, so reveal and speech stay in lockstep. */
 export type HearingVoice = {
@@ -45,6 +46,7 @@ export function useLiveHearing(entry: CaseEntry, voice: HearingVoice = {}) {
   const [thinkingAgent, setThinkingAgent] = useState<Faction | null>(null);
   const [verdict, setVerdict] = useState<Verdict>(entry.transcript.verdict);
   const [live, setLive] = useState(false);
+  const [auditRoot, setAuditRoot] = useState<string | null>(null);
   const runId = useRef(0);
   const voiceRef = useRef(voice);
   voiceRef.current = voice;
@@ -55,6 +57,7 @@ export function useLiveHearing(entry: CaseEntry, voice: HearingVoice = {}) {
     setThinkingAgent(null);
     setVerdict(entry.transcript.verdict);
     setLive(false);
+    setAuditRoot(null);
     setPhase("debate");
 
     const events: Ev[] = [];
@@ -91,7 +94,14 @@ export function useLiveHearing(entry: CaseEntry, voice: HearingVoice = {}) {
               const line = buf.slice(0, nl).trim();
               buf = buf.slice(nl + 1);
               if (!line) continue;
-              let msg: { type: string; agent?: Faction; turn?: Turn; verdict?: Verdict; message?: string };
+              let msg: {
+                type: string;
+                agent?: Faction;
+                turn?: Turn;
+                verdict?: Verdict;
+                message?: string;
+                auditRoot?: string;
+              };
               try {
                 msg = JSON.parse(line);
               } catch {
@@ -108,6 +118,8 @@ export function useLiveHearing(entry: CaseEntry, voice: HearingVoice = {}) {
                 if (got === 1) voiceRef.current.prefetch?.(msg.turn);
               } else if (msg.type === "verdict" && msg.verdict) {
                 events.push({ type: "verdict", verdict: msg.verdict });
+              } else if (msg.type === "done" && msg.auditRoot) {
+                events.push({ type: "auditRoot", auditRoot: msg.auditRoot });
               } else if (msg.type === "error") {
                 throw new Error(msg.message || "stream error");
               }
@@ -179,6 +191,8 @@ export function useLiveHearing(entry: CaseEntry, voice: HearingVoice = {}) {
           await sleep(GAP_MS);
         } else if (ev.type === "verdict") {
           setVerdict(ev.verdict);
+        } else if (ev.type === "auditRoot") {
+          setAuditRoot(ev.auditRoot);
         }
       }
       if (runId.current !== my) return;
@@ -196,11 +210,14 @@ export function useLiveHearing(entry: CaseEntry, voice: HearingVoice = {}) {
     setVerdict(entry.transcript.verdict);
     setPhase("idle");
     setLive(false);
+    setAuditRoot(null);
   }, [entry]);
 
-  const deliverVerdict = useCallback(() => {
+  /** The human reviewer's ruling becomes the record of decision; the AI's rationale stays as supporting context. */
+  const deliverVerdict = useCallback((decision: Verdict["decision"]) => {
     runId.current++;
     setThinkingAgent(null);
+    setVerdict((v) => ({ ...v, decision, by: "Human reviewer" }));
     setPhase("verdict");
   }, []);
 
@@ -208,5 +225,7 @@ export function useLiveHearing(entry: CaseEntry, voice: HearingVoice = {}) {
   const expected = Math.max(entry.transcript.turns.length, 1);
   const progress = phase === "idle" ? 0 : phase === "debate" ? Math.min(turns.length / expected, 0.96) : 1;
 
-  return { phase, turns, thinkingAgent, verdict, live, activeId, progress, start, restart, deliverVerdict };
+  return { phase, turns, thinkingAgent, verdict, live, auditRoot, activeId, progress, start, restart, deliverVerdict };
 }
+
+export type HearingState = ReturnType<typeof useLiveHearing>;

@@ -1,36 +1,33 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+Juro's Next.js half — the landing page and the Chamber (live cross-model hearing). See the repo root [README](../README.md) and [CLAUDE.md](../CLAUDE.md) for the full project.
 
-## Getting Started
-
-First, run the development server:
+## Getting started
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run dev      # http://localhost:3000
+npm run build
+npm run lint
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Environment variables
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Without any keys, the app still runs fully at `localhost:3000` — the Chamber falls back to the bundled sample transcript (`src/data/cases.ts`) and voice playback is simply unavailable. Add keys to go live:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Create `web/.env.local` (gitignored) with:
 
-## Learn More
+```
+ANTHROPIC_API_KEY=sk-ant-...     # required for live hearings (/api/hearing)
+DEEPGRAM_API_KEY=...             # required for spoken playback (/api/speak)
+```
 
-To learn more about Next.js, take a look at the following resources:
+| Key | Where to get it |
+|---|---|
+| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/) → Settings → API Keys |
+| `DEEPGRAM_API_KEY` | [console.deepgram.com](https://console.deepgram.com/) → API Keys (free tier available) |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Restart `npm run dev` after editing `.env.local` — it's only read at startup.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Learn more
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- [Next.js Documentation](https://nextjs.org/docs)
+- [Learn Next.js](https://nextjs.org/learn)
