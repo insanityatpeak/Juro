@@ -45,3 +45,6 @@ next-env.d.ts
 /CLAUDE.md
 
 .vercel
+
+# hearings database (created at runtime)
+/.data/

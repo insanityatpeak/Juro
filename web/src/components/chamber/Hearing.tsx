@@ -3,12 +3,22 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { HearingTranscript } from "@/components/HearingTranscript";
-import { useLiveHearing, type HearingState } from "@/lib/useLiveHearing";
+import { useBackgroundHearing, type HearingState } from "@/lib/useBackgroundHearing";
 import { useVoice } from "@/lib/useVoice";
 import type { CaseEntry, Transcript } from "@/lib/types";
 import { RightRail } from "./RightRail";
+import { StatusBanner } from "./StatusBanner";
 
-export function Hearing({ entry, onBack }: { entry: CaseEntry; onBack: () => void }) {
+export function Hearing({
+  entry,
+  onBack,
+  hearingId = null,
+}: {
+  entry: CaseEntry;
+  onBack: () => void;
+  /** Set when reopening an existing hearing from its link. */
+  hearingId?: string | null;
+}) {
   const transcript: Transcript = entry.transcript;
   const cf = transcript.case;
 
@@ -16,19 +26,27 @@ export function Hearing({ entry, onBack }: { entry: CaseEntry; onBack: () => voi
   const [listen, setListen] = useState(false);
   const [focus, setFocus] = useState<string | null>(null);
 
-  // The player (useLiveHearing) drives the voice: it reveals a turn and waits for
-  // its audio to finish before the next, so reply and speech stay in lockstep.
-  // A ref lets the player read the *current* Listen state without re-subscribing.
-  const listenRef = useRef(listen);
+  // The hearing runs on the server and keeps going without this page.
+  const pb = useBackgroundHearing(entry, hearingId);
+
+  // Listen: read newly arrived turns aloud, one after another.
+  const spoken = useRef<Set<string>>(new Set());
+  const speaking = useRef(false);
+  const [voiceTick, setVoiceTick] = useState(0);
   useEffect(() => {
-    listenRef.current = listen;
-  }, [listen]);
-  const pb = useLiveHearing(entry, {
-    speak: voice.speak,
-    isListening: () => listenRef.current,
-    prefetch: (t) => voice.prime([t]),
-    ready: voice.ready,
-  });
+    if (!listen || speaking.current) return;
+    const next = pb.turns.find((t) => !spoken.current.has(t.id));
+    if (!next) return;
+    speaking.current = true;
+    spoken.current.add(next.id);
+    voice
+      .speak(next)
+      .catch(() => {})
+      .finally(() => {
+        speaking.current = false;
+        setVoiceTick((n) => n + 1);
+      });
+  }, [listen, pb.turns, voiceTick, voice]);
 
   const revealed = pb.turns;
   const current = revealed.length ? revealed[revealed.length - 1] : null;
@@ -37,13 +55,18 @@ export function Hearing({ entry, onBack }: { entry: CaseEntry; onBack: () => voi
   const toggleListen = () => {
     const next = !listen;
     setListen(next);
-    if (!next) voice.stop();
+    if (!next) {
+      voice.stop();
+      speaking.current = false;
+    }
   };
 
   const back = () => {
     voice.reset();
+    speaking.current = false;
     pb.restart();
     setFocus(null);
+    window.history.replaceState(null, "", "/chamber");
     onBack();
   };
 
@@ -60,9 +83,10 @@ export function Hearing({ entry, onBack }: { entry: CaseEntry; onBack: () => voi
             <span className="text-[14px] text-cchalk">{cf.patient}</span>
             <span className="text-cslate">·</span>
             <span className="text-[14px] text-cchalkdim">{cf.procedure}</span>
-            {pb.live && pb.phase !== "idle" && (
+            {pb.mode && (
               <span className="mono ml-1 flex items-center gap-1.5 text-[10px] text-cbrass">
-                <span className="h-1.5 w-1.5 rounded-full" style={{ background: "var(--c-brass)" }} /> live
+                <span className="h-1.5 w-1.5 rounded-full" style={{ background: "var(--c-brass)" }} />
+                {pb.live ? "live" : "sample"}
               </span>
             )}
           </div>
@@ -76,11 +100,17 @@ export function Hearing({ entry, onBack }: { entry: CaseEntry; onBack: () => voi
         </button>
       </header>
 
+      <StatusBanner pb={pb} />
+
       <div className="grid min-h-0 gap-0 lg:grid-cols-[minmax(0,1fr)_360px]">
         {/* main column */}
         <main className="flex min-h-0 flex-col border-cinkline lg:border-r">
-          {pb.phase === "idle" ? (
-            <Intro onStart={pb.start} />
+          {pb.notFound ? (
+            <Message title="Hearing not found." body="This link does not match a hearing on this server." action={{ label: "Back to cases", onClick: back }} />
+          ) : pb.loading ? (
+            <Message title="Loading the hearing…" body="" />
+          ) : pb.phase === "idle" ? (
+            <Intro onStart={pb.start} starting={pb.starting} error={pb.startError} />
           ) : (
             <>
               <div className="scroll-fade min-h-0 flex-1 overflow-y-auto px-6 py-6">
@@ -113,35 +143,55 @@ export function Hearing({ entry, onBack }: { entry: CaseEntry; onBack: () => voi
   );
 }
 
-function Intro({ onStart }: { onStart: () => void }) {
+function Message({ title, body, action }: { title: string; body: string; action?: { label: string; onClick: () => void } }) {
+  return (
+    <div className="mx-auto flex max-w-md flex-1 flex-col items-center justify-center px-6 py-20 text-center">
+      <div className="display text-2xl text-cchalk">{title}</div>
+      {body && <p className="mt-3 text-[15px] leading-relaxed text-cchalkdim">{body}</p>}
+      {action && (
+        <button onClick={action.onClick} className="btn btn-brass mt-7">
+          {action.label}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function Intro({ onStart, starting, error }: { onStart: () => void; starting: boolean; error: string | null }) {
   return (
     <div className="mx-auto flex max-w-md flex-1 flex-col items-center justify-center px-6 py-20 text-center">
       <div className="display text-3xl text-cchalk">A claim was denied.</div>
       <p className="mt-3 text-[15px] leading-relaxed text-cchalkdim">
-        Convene the tribunal and hear both sides argue from the record. You deliver the ruling.
+        Convene the tribunal and hear both sides argue from the record. The hearing runs on the server, so you can leave
+        and come back to it. You deliver the ruling.
       </p>
-      <button onClick={onStart} className="btn btn-brass mt-7">
-        Convene the tribunal
+      <button onClick={onStart} disabled={starting} className="btn btn-brass mt-7 disabled:opacity-50">
+        {starting ? "Convening…" : "Convene the tribunal"}
       </button>
+      {error && <p className="mt-4 text-[13px] text-coxblood">{error}</p>}
     </div>
   );
 }
 
 function Transport({ pb }: { pb: HearingState }) {
   const status =
-    pb.phase === "ready"
-      ? "deliberation complete"
-      : pb.phase === "verdict"
-        ? "ruled"
-        : pb.live
-          ? "in session · live"
-          : "in session";
+    pb.phase === "verdict"
+      ? "ruled"
+      : pb.status === "complete"
+        ? "deliberation complete"
+        : pb.status === "paused"
+          ? "paused"
+          : pb.status === "partial"
+            ? "partial · not a complete record"
+            : pb.status === "failed"
+              ? "failed"
+              : pb.status === "waiting"
+                ? "queued"
+                : "in session";
+  const moving = pb.status === "running";
   return (
     <div className="flex items-center gap-4 border-t border-cinkline px-6 py-4">
-      <span
-        className="h-2 w-2 shrink-0 rounded-full"
-        style={{ background: pb.phase === "debate" ? "var(--c-brass)" : "var(--c-ink-line)" }}
-      />
+      <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: moving ? "var(--c-brass)" : "var(--c-ink-line)" }} />
       <div className="h-1 flex-1 overflow-hidden rounded-full bg-cink2">
         <motion.div
           className="h-full bg-cbrass"

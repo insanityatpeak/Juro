@@ -1,5 +1,5 @@
 import type { EvidenceItem, Transcript } from "@/lib/types";
-import type { HearingState } from "@/lib/useLiveHearing";
+import type { HearingState } from "@/lib/useBackgroundHearing";
 import { RulingPanel } from "./RulingPanel";
 
 export function RightRail({

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import type { HearingState } from "@/lib/useLiveHearing";
+import type { HearingState } from "@/lib/useBackgroundHearing";
 import type { Transcript } from "@/lib/types";
 
 export function RulingPanel({
@@ -21,7 +21,9 @@ export function RulingPanel({
 
       {!ready && !ruled && (
         <p className="rounded-sm border border-cinkline bg-cink2 px-3 py-3 text-[12.5px] leading-relaxed text-cchalkdim">
-          Hear both sides through. The ruling unlocks once deliberation is complete.
+          {pb.status === "partial" || pb.status === "failed" || pb.status === "paused"
+            ? `Ruling locked. This hearing is ${pb.status}, so it is not a complete record. Continue it from the banner above; the ruling unlocks only once every turn is on the record.`
+            : "Hear both sides through. The ruling unlocks once deliberation is complete."}
         </p>
       )}
 
@@ -46,6 +48,7 @@ export function RulingPanel({
           <button onClick={() => pb.deliverVerdict(choice)} className="btn btn-brass !py-2.5 !text-[13px]">
             Seal ruling and draft appeal
           </button>
+          {pb.rulingError && <p className="text-[12px] text-coxblood">{pb.rulingError}</p>}
         </div>
       )}
 
