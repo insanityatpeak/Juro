@@ -1,3 +1,4 @@
+import { providerPolicy, type ProviderPolicy } from "../providers";
 import { MODEL_FOR, SYSTEM_PROMPTS, TURN_PLAN, VERDICT_MODEL } from "../roles";
 import type { CaseEntry, Faction, TurnType, Verdict } from "../types";
 import type { HearingMode, StoredTurn } from "./types";
@@ -70,54 +71,82 @@ function parseJson(raw: string): Record<string, unknown> {
   }
 }
 
-async function errorDetail(r: Response): Promise<string> {
-  try {
-    const d = (await r.json()) as { error?: { message?: string } };
-    return d?.error?.message ? ` (${String(d.error.message).slice(0, 160)})` : "";
-  } catch {
-    return "";
-  }
+export interface AskDeps {
+  fetch: typeof fetch;
+  timeoutMs: number;
+  policy: () => ProviderPolicy;
+  apiKey: () => string | undefined;
 }
 
-async function ask(model: string, system: string, user: string): Promise<string> {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) throw new SourceError("permanent", "auth_failed", "ANTHROPIC_API_KEY is not set on the server.");
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), CALL_TIMEOUT_MS);
-  let r: Response;
-  try {
-    r = await fetch(ANTHROPIC, {
-      method: "POST",
-      headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify({ model, max_tokens: 400, system, messages: [{ role: "user", content: user }] }),
-      signal: controller.signal,
-    });
-  } catch (e) {
-    if ((e as Error)?.name === "AbortError") {
-      throw new SourceError("transient", "timeout", `The AI provider did not answer within ${CALL_TIMEOUT_MS / 1000}s.`);
-    }
-    throw new SourceError("transient", "network", "Could not reach the AI provider.");
-  } finally {
-    clearTimeout(timer);
-  }
+/**
+ * One provider call. The provider policy is checked on every call (so retries and queued work
+ * stop as soon as generation is disabled), and the timeout covers the whole exchange,
+ * including reading the response body (success and error bodies alike).
+ */
+export function createAsk(deps: AskDeps) {
+  return async function ask(model: string, system: string, user: string): Promise<string> {
+    const policy = deps.policy();
+    if (!policy.allowed) throw new SourceError("permanent", "provider_disabled", policy.reason);
+    const key = deps.apiKey();
+    if (!key) throw new SourceError("permanent", "auth_failed", "ANTHROPIC_API_KEY is not set on the server.");
 
-  if (!r.ok) {
-    const detail = await errorDetail(r);
-    if (r.status === 429) {
-      const ra = Number(r.headers.get("retry-after"));
-      throw new SourceError("transient", "rate_limited", "The AI provider is rate limiting requests.", Number.isFinite(ra) && ra > 0 ? ra * 1000 : undefined);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), deps.timeoutMs);
+    const timedOut = () =>
+      new SourceError("transient", "timeout", `The AI provider did not answer within ${deps.timeoutMs / 1000}s.`);
+    try {
+      let r: Response;
+      try {
+        r = await deps.fetch(ANTHROPIC, {
+          method: "POST",
+          headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+          body: JSON.stringify({ model, max_tokens: 400, system, messages: [{ role: "user", content: user }] }),
+          signal: controller.signal,
+        });
+      } catch {
+        if (controller.signal.aborted) throw timedOut();
+        throw new SourceError("transient", "network", "Could not reach the AI provider.");
+      }
+
+      // Read the body while the timer is still armed: a stalled body must not hold the worker.
+      let body: unknown;
+      try {
+        body = await r.json();
+      } catch {
+        if (controller.signal.aborted) throw timedOut();
+        body = null;
+      }
+
+      if (!r.ok) {
+        const m = (body as { error?: { message?: string } } | null)?.error?.message;
+        const detail = m ? ` (${String(m).slice(0, 160)})` : "";
+        if (r.status === 429) {
+          const ra = Number(r.headers.get("retry-after"));
+          throw new SourceError("transient", "rate_limited", "The AI provider is rate limiting requests.", Number.isFinite(ra) && ra > 0 ? ra * 1000 : undefined);
+        }
+        if (r.status === 401 || r.status === 403) {
+          throw new SourceError("permanent", "auth_failed", `The AI provider rejected the API key (HTTP ${r.status}).${detail}`);
+        }
+        if (r.status === 408 || r.status === 409 || r.status >= 500) {
+          throw new SourceError("transient", "upstream_error", `The AI provider had a temporary error (HTTP ${r.status}).`);
+        }
+        throw new SourceError("permanent", "request_rejected", `The AI provider rejected the request (HTTP ${r.status}).${detail}`);
+      }
+      if (!body) throw new SourceError("transient", "bad_output", "The AI provider returned an unreadable response.");
+      const d = body as { content?: { type: string; text?: string }[] };
+      return (d.content || []).filter((b) => b.type === "text").map((b) => b.text || "").join("").trim();
+    } finally {
+      clearTimeout(timer);
     }
-    if (r.status === 401 || r.status === 403) {
-      throw new SourceError("permanent", "auth_failed", `The AI provider rejected the API key (HTTP ${r.status}).${detail}`);
-    }
-    if (r.status === 408 || r.status === 409 || r.status >= 500) {
-      throw new SourceError("transient", "upstream_error", `The AI provider had a temporary error (HTTP ${r.status}).`);
-    }
-    throw new SourceError("permanent", "request_rejected", `The AI provider rejected the request (HTTP ${r.status}).${detail}`);
-  }
-  const d = (await r.json()) as { content?: { type: string; text?: string }[] };
-  return (d.content || []).filter((b) => b.type === "text").map((b) => b.text || "").join("").trim();
+  };
 }
+
+const ask = createAsk({
+  fetch: (...a) => fetch(...a),
+  timeoutMs: CALL_TIMEOUT_MS,
+  policy: () => providerPolicy("generation"),
+  apiKey: () => process.env.ANTHROPIC_API_KEY,
+});
 
 export const liveSource: TurnSource = {
   mode: "live",
@@ -183,9 +212,10 @@ export const sampleSource: TurnSource = {
   },
 };
 
+/** New hearings are live only if the generation control allows it; an API key alone never does. */
 export function pickMode(): HearingMode {
   if (process.env.HEARING_MODE === "sample") return "sample";
-  return process.env.ANTHROPIC_API_KEY ? "live" : "sample";
+  return providerPolicy("generation").allowed && process.env.ANTHROPIC_API_KEY ? "live" : "sample";
 }
 
 export const getSource = (mode: HearingMode): TurnSource => (mode === "live" ? liveSource : sampleSource);
