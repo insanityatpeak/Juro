@@ -24,6 +24,9 @@ agent_config.yaml
 # generated at runtime
 web/public/transcript.json
 
+# local verification artifacts (scripts, results, screenshots)
+.verification/
+
 # os / editor
 .DS_Store
 Thumbs.db
