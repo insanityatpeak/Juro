@@ -1,7 +1,6 @@
 /**
  * Live hearing configuration (server-side). Live hearings use Groq's free tier only.
- * Models are overridable because free-plan availability can change; confirm both models
- * appear on the account's limits page before enabling live hearings.
+ * Use one model for all roles. Confirm it appears on the account's Free-plan limits page.
  */
 export const LIVE_PROVIDER_LABEL = "Groq Free";
 
@@ -11,9 +10,10 @@ export interface LiveModels {
 }
 
 export function liveModels(): LiveModels {
+  const model = process.env.GROQ_MODEL || "openai/gpt-oss-20b";
   return {
-    debater: process.env.GROQ_DEBATER_MODEL || "openai/gpt-oss-20b",
-    chair: process.env.GROQ_CHAIR_MODEL || "openai/gpt-oss-120b",
+    debater: model,
+    chair: model,
   };
 }
 

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { NO_STORE } from "@/lib/hearings/http";
 import { LIVE_PROVIDER_LABEL, liveModels } from "@/lib/live";
 import { providerPolicy } from "@/lib/providers";
+import { liveSessionConfig } from "@/lib/liveSession";
 
 export const runtime = "nodejs";
 
@@ -9,8 +10,10 @@ export const runtime = "nodejs";
 // Never returns the key.
 export async function GET() {
   const policy = providerPolicy("groq");
+  const available = policy.allowed && !!liveSessionConfig();
   return NextResponse.json(
-    { available: policy.allowed, provider: LIVE_PROVIDER_LABEL, models: policy.allowed ? liveModels() : null, reason: policy.reason || null },
+    { available, access: "invited_testers", provider: LIVE_PROVIDER_LABEL, models: available ? liveModels() : null,
+      reason: available ? null : policy.reason || "Invited live hearings are not configured." },
     { headers: NO_STORE },
   );
 }

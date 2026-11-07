@@ -4,12 +4,9 @@ import type { CaseEntry, Faction, Turn, Verdict } from "./types";
 import { SourceError, type TurnSource } from "./hearings/source";
 
 /**
- * Stateless live-hearing step, safe for serverless hosts: the browser holds the transcript and
- * sends it back each step; the server checks it against the fixed turn plan, runs ONE model call
- * for the next step, and returns the result. No database, no background worker.
- *
- * The client-held transcript is untrusted: it can only steer the next turn of the client's own
- * hearing. The case and evidence always come from the bundled synthetic cases, never the client.
+ * Internal live step: liveSession verifies the signed continuation before this parser runs.
+ * This validates structure, NOT provenance; never expose it directly to browser transcripts.
+ * Case and evidence come from bundled synthetic cases. No database or background worker.
  */
 const MAX_TEXT = 800;
 const VALID_ADDRESSES = new Set<Faction>(["advocate", "scrutinizer", "evidence", "adjudicator", "human"]);

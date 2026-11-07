@@ -73,7 +73,7 @@ export function Bench({ active, live = false, engines = null }: { active: Factio
         {!live
           ? "sample record · these turns are pre-written; no AI model is running"
           : engines
-            ? `live · Groq free tier · three debaters on ${engines.debater} · chair on ${engines.chair}`
+            ? `live · Groq free tier · four roles on ${engines.debater}`
             : "live · Groq free tier"}
       </p>
     </div>

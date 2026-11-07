@@ -112,7 +112,7 @@ test("a malformed recommendation is retried, never defaulted to a decision", asy
   assert.doesNotMatch(v.by, /Dr\./);
 });
 
-test("paid providers stay off; Groq needs both the opt-in and a key", () => {
+test("paid providers stay off; Groq needs opt-in, a key, and explicit Free-account confirmation", () => {
   const prev = { ...process.env };
   try {
     process.env.ANTHROPIC_API_KEY = "set";
@@ -123,6 +123,9 @@ test("paid providers stay off; Groq needs both the opt-in and a key", () => {
     delete process.env.JURO_LIVE_PROVIDER;
     assert.equal(providerPolicy("groq").allowed, false); // key alone is not enough
     process.env.JURO_LIVE_PROVIDER = "groq";
+    delete process.env.JURO_GROQ_FREE_CONFIRMED;
+    assert.equal(providerPolicy("groq").allowed, false);
+    process.env.JURO_GROQ_FREE_CONFIRMED = "1";
     assert.equal(providerPolicy("groq").allowed, true);
     delete process.env.HEARING_MODE;
     assert.equal(pickMode(), "sample"); // sample stays the default even when live is available

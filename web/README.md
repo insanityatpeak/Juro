@@ -18,24 +18,27 @@ The app makes no paid API calls. Provider controls live in `src/lib/providers.ts
 |---|---|
 | `anthropic` | Off, always. `ANTHROPIC_API_KEY` is ignored. |
 | `deepgram` | Off, always. `/api/speak` returns `503 provider_disabled`; **Listen** uses the browser's speech synthesis. |
-| `groq` | Off unless the server sets `JURO_LIVE_PROVIDER=groq` **and** `GROQ_API_KEY`. Free tier only. |
+| `groq` | Off unless the server sets `JURO_LIVE_PROVIDER=groq`, `GROQ_API_KEY`, and `JURO_GROQ_FREE_CONFIRMED=1`. Free tier only. |
 
-## Live hearings (Groq Free, opt-in)
+## Live hearings (Groq Free, invited preview)
 
-Sample replay stays the default. To offer a live hearing:
+Sample replay stays the default. The public deployment should remain sample-only until a real Free-account hearing is verified. To run an invited preview:
 
-1. Create a **dedicated Groq account on the Free plan** with **no payment method and no paid upgrade**, so usage cannot be billed. Create an API key there.
-2. On that account's limits page, confirm the models are available on the Free plan: by default `openai/gpt-oss-20b` (debaters) and `openai/gpt-oss-120b` (chair). Override with `GROQ_DEBATER_MODEL` / `GROQ_CHAIR_MODEL`.
-3. Set server env: `JURO_LIVE_PROVIDER=groq`, `GROQ_API_KEY=...` (server-only; never `NEXT_PUBLIC_`).
-4. Set `NEXT_PUBLIC_LIVE_HEARINGS=1` at build time to show "Run a live hearing instead" on the case intro.
+1. Create a **dedicated Groq account on the Free plan** with **no payment method and no paid upgrade**. Verify its billing settings and model access in the account console; the app cannot infer these from an API key.
+2. Confirm `openai/gpt-oss-20b` is available on that account. All four roles use this one model; `GROQ_MODEL` overrides it. Old per-role model overrides are no longer used.
+3. Set server-only `JURO_LIVE_PROVIDER=groq`, `GROQ_API_KEY`, and `JURO_GROQ_FREE_CONFIRMED=1` after that check. The confirmation is an operator assertion, not automatic billing verification.
+4. Set two independent random secrets: `LIVE_TESTER_CODE` (24–256 characters, shared only with invited testers) and `LIVE_SESSION_SECRET` (at least 32 characters, never shared). Generate each using a cryptographic random generator. Never put either secret or the provider key in `NEXT_PUBLIC_*` variables, URLs, or source control.
+5. Set `NEXT_PUBLIC_LIVE_HEARINGS=1` at build time to show the live option. Testers enter the invite code on the case intro; it stays in page memory and is sent only to the session endpoint.
 
-How it runs (works on Vercel/serverless): the browser drives the hearing one step at a time via `POST /api/live/step` with `{ caseId, turns }`. The server keeps no state and needs no database or worker. Each request is checked against the fixed turn plan, uses only the bundled synthetic case, makes one Groq call, and returns the next turn or the final recommendation. `GET /api/live` reports whether live is available (never the key).
+`POST /api/live/session` accepts `{ caseId, inviteCode }` and issues a signed, one-hour continuation. `POST /api/live/step` accepts **only** `{ continuation }`. Its HMAC covers the session ID, case, model, case/evidence/prompt/plan fingerprint, expiry and all prior turns. Client-written turns and tampered tokens are rejected before any provider call. Changed model or inputs require a new session; the service never mixes versions. Bump the protocol version in `liveSession.ts` when generation instructions outside the fingerprint change. `GET /api/live` reports availability without returning secrets.
+
+No database or persistent worker is needed. Successful and in-flight duplicate steps reuse the same response **within one instance**. The process also limits admission to five sessions per UTC day, one active provider step, three attempts per step, and a bounded replay cache. A full cache refuses new work rather than evicting valid replay records. These protections reset with the instance and **do not prevent cross-instance replay or enforce a global quota**. Do not open access to the public until shared admission and replay storage are implemented. Rotating the signing secret invalidates active sessions; rotating only the invite stops new sessions with the old invite.
 
 - **Quota used up** (Groq 429 for a daily limit, or a long `retry-after`): the hearing **pauses**; **Resume** continues from the next turn. Short per-minute limits are retried with backoff. There is **no paid fallback**.
 - **Pause**: the in-flight step finishes and is kept, then it stops. If that step fails, it pauses without retrying. A completed final recommendation ends the hearing.
-- **Nothing is stored or sealed**: leaving the page ends the hearing (the request in flight is aborted). The ruling stays in that browser.
+- **No durable record or audit seal**: continuations and responses are cached briefly in server memory. Leaving or reloading ends the hearing; its transcript and ruling are lost. Client cancellation stops further steps, but does not guarantee an already accepted provider request is cancelled. Sessions expire after one hour, even while paused; after expiry start a new hearing.
 - **Recommendations**: a malformed model answer is retried, never defaulted to a decision. No model "confidence" is shown.
-- **Abuse**: a best-effort per-IP limit (`LIVE_STEPS_PER_MINUTE`, default 20) applies per server instance. The real ceiling is the free quota, so a heavy user can exhaust it for everyone, but cannot cause a charge.
+- **Access**: only a valid tester code can issue new continuations. A continuation is a bearer credential; do not share it. An invited tester can still exhaust shared Free quota across instances. Keeping the provider account on Free is essential; the application cannot prevent an account owner from upgrading it.
 
 `GROQ_BASE_URL` overrides the endpoint for local testing against a mock only.
 

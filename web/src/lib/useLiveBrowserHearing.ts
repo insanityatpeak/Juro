@@ -11,18 +11,18 @@ const MAX_TRIES = 3;
 const backoff = (tries: number, retryAfterMs?: number) => Math.min(Math.max(retryAfterMs ?? 0, 2000 * 2 ** (tries - 1)), 30000);
 
 type StepBody =
-  | { kind: "turn"; turn: Omit<StoredTurn, "seq" | "hash"> }
-  | { kind: "verdict"; verdict: Verdict }
+  | { kind: "turn"; turn: Omit<StoredTurn, "seq" | "hash">; continuation: string }
+  | { kind: "verdict"; verdict: Verdict; continuation: null }
   | { error: string; kind: string; message: string; retryAfterMs?: number };
 
 /**
  * Live hearing on Groq's free tier, driven from the browser one step at a time (POST /api/live/step).
- * Works on serverless hosts: the server keeps no state. Leaving the page ends the hearing.
+ * Signed continuations preserve transcript provenance. Leaving the page ends the hearing.
  *
  * Pause: the step in flight finishes and is kept, then the hearing stops before the next one.
  * Quota used up: the hearing pauses; Resume continues. There is no paid fallback.
  */
-export function useLiveBrowserHearing(entry: CaseEntry): HearingState {
+export function useLiveBrowserHearing(entry: CaseEntry, inviteCode: string): HearingState {
   const [started, setStarted] = useState(false);
   const [turns, setTurns] = useState<StoredTurn[]>([]);
   const [status, setStatus] = useState<HearingStatus | null>(null);
@@ -33,11 +33,16 @@ export function useLiveBrowserHearing(entry: CaseEntry): HearingState {
   const [verdict, setVerdict] = useState<Verdict | null>(null);
   const [decision, setDecision] = useState<Verdict["decision"] | null>(null);
   const [engines, setEngines] = useState<LiveModels | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
 
   const turnsRef = useRef<StoredTurn[]>([]);
   const pauseRef = useRef(false);
   const runRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
+  const continuationRef = useRef<string | null>(null);
+  const startingRef = useRef(false);
+  const runningRef = useRef(false);
 
   const total = TURN_PLAN.length;
   const where = () => (turnsRef.current.length >= total ? "the final recommendation" : `turn ${turnsRef.current.length + 1} of ${total}`);
@@ -51,6 +56,8 @@ export function useLiveBrowserHearing(entry: CaseEntry): HearingState {
   }, []);
 
   const run = useCallback(async () => {
+    if (runningRef.current) return;
+    runningRef.current = true;
     const my = ++runRef.current;
     setStatus("running");
     setPauseReason(null);
@@ -59,6 +66,7 @@ export function useLiveBrowserHearing(entry: CaseEntry): HearingState {
     let tries = 0;
     const alive = () => runRef.current === my;
 
+    try {
     for (;;) {
       if (!alive()) return;
       if (pauseRef.current) {
@@ -74,10 +82,7 @@ export function useLiveBrowserHearing(entry: CaseEntry): HearingState {
         res = await fetch("/api/live/step", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            caseId: entry.id,
-            turns: turnsRef.current.map(({ agent, type, text, addressedTo, evidenceRefs }) => ({ agent, type, text, addressedTo, evidenceRefs })),
-          }),
+          body: JSON.stringify({ continuation: continuationRef.current }),
           signal: ctrl.signal,
         });
         data = (await res.json().catch(() => null)) as StepBody | null;
@@ -91,6 +96,7 @@ export function useLiveBrowserHearing(entry: CaseEntry): HearingState {
         setAttempt(0);
         setError(null);
         if (data.kind === "turn") {
+          continuationRef.current = data.continuation;
           const t: StoredTurn = { ...data.turn, seq: turnsRef.current.length + 1, hash: "" }; // not hash-chained
           turnsRef.current = [...turnsRef.current, t];
           setTurns(turnsRef.current);
@@ -118,13 +124,15 @@ export function useLiveBrowserHearing(entry: CaseEntry): HearingState {
         stopHere("system", {
           code,
           message,
-          nextAction: `The free-tier quota is used up. Press Resume once it resets to continue from ${where()}; the turns so far are kept.`,
+          nextAction: code === "quota_exhausted"
+            ? "The free quota is used up. Resume after it resets if this one-hour session is still valid; otherwise start a new hearing."
+            : `Wait before pressing Resume to continue from ${where()}. The turns so far are kept.`,
         });
         return;
       }
-      if (kind === "permanent" || (res && (res.status === 400 || res.status === 503))) {
+      if (kind === "permanent" || (res && [400, 403, 409, 410, 413, 503].includes(res.status))) {
         setStatus(turnsRef.current.length ? "partial" : "failed");
-        setError({ code, message, nextAction: res?.status === 503 ? "Live hearings are unavailable on this server. Go back and replay the sample instead." : `Press Retry to continue from ${where()}.` });
+        setError({ code, message, nextAction: res?.status === 503 ? "Live hearings are unavailable on this server. Go back and replay the sample instead." : ["invalid_session", "session_expired", "context_changed", "attempts_exhausted"].includes(code) ? "Go back to cases and start a new hearing, or replay the sample." : `Press Retry to continue from ${where()}.` });
         return;
       }
       tries++;
@@ -136,25 +144,56 @@ export function useLiveBrowserHearing(entry: CaseEntry): HearingState {
       }
       await new Promise((r) => setTimeout(r, backoff(tries, e?.retryAfterMs)));
     }
-  }, [entry.id, stopHere]); // eslint-disable-line react-hooks/exhaustive-deps
+    } finally {
+      if (runRef.current === my) runningRef.current = false;
+    }
+  }, [stopHere]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const start = useCallback(async () => {
-    turnsRef.current = [];
-    pauseRef.current = false;
-    setTurns([]);
-    setVerdict(null);
-    setDecision(null);
-    setPauseRequested(false);
-    setStarted(true);
-    fetch("/api/live", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((d: { models?: LiveModels | null }) => setEngines(d.models ?? null))
-      .catch(() => {});
-    void run();
-  }, [run]);
+    if (startingRef.current || runningRef.current) return;
+    startingRef.current = true;
+    setStarting(true);
+    setStartError(null);
+    const my = ++runRef.current;
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    try {
+      const r = await fetch("/api/live/session", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ caseId: entry.id, inviteCode }), signal: ctrl.signal,
+      });
+      const data = await r.json();
+      if (runRef.current !== my) return;
+      if (!r.ok || typeof data.continuation !== "string") {
+        setStartError(data.message || "Could not start this live hearing.");
+        return;
+      }
+      continuationRef.current = data.continuation;
+      setEngines(data.models);
+      turnsRef.current = [];
+      pauseRef.current = false;
+      setTurns([]);
+      setVerdict(null);
+      setDecision(null);
+      setPauseRequested(false);
+      setStarted(true);
+      startingRef.current = false;
+      setStarting(false);
+      void run();
+    } catch {
+      if (runRef.current === my) setStartError("Could not reach the server. Please try again.");
+    } finally {
+      if (runRef.current === my) {
+        startingRef.current = false;
+        setStarting(false);
+      }
+    }
+  }, [entry.id, inviteCode, run]);
 
   const cancelRun = useCallback(() => {
     runRef.current++;
+    runningRef.current = false;
+    startingRef.current = false;
     abortRef.current?.abort();
   }, []);
 
@@ -170,6 +209,9 @@ export function useLiveBrowserHearing(entry: CaseEntry): HearingState {
     setError(null);
     setVerdict(null);
     setDecision(null);
+    setStarting(false);
+    setStartError(null);
+    continuationRef.current = null;
   }, [cancelRun]);
 
   // Leaving the page or the case ends the hearing: stop the loop and abort the request in flight.
@@ -229,8 +271,8 @@ export function useLiveBrowserHearing(entry: CaseEntry): HearingState {
     loading: false,
     notFound: false,
     offline: false,
-    starting: false,
-    startError: null,
+    starting,
+    startError,
     rulingError: null,
     busy: false,
     pause,

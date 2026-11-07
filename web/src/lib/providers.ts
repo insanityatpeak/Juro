@@ -1,7 +1,8 @@
 /**
  * Provider controls. Juro must run without paid services:
  *  - anthropic, deepgram: paid, always off. Setting their API keys does nothing.
- *  - groq: free tier only, opt-in on the server with JURO_LIVE_PROVIDER=groq and GROQ_API_KEY.
+ *  - groq: free tier only, opt-in with JURO_LIVE_PROVIDER=groq, GROQ_API_KEY,
+ *    and operator assertion JURO_GROQ_FREE_CONFIRMED=1.
  *    The key must belong to a dedicated Groq Free-plan account with no payment method or paid
  *    upgrade. There is no paid fallback: if Groq is unavailable or out of quota, live hearings pause.
  *
@@ -24,12 +25,13 @@ export function providerPolicy(p: Provider): ProviderPolicy {
     case "deepgram":
       return { allowed: false, reason: `Server text-to-speech is disabled: ${NO_PAID}. Audio uses the browser's built-in voices.` };
     case "groq": {
-      const on = process.env.JURO_LIVE_PROVIDER === "groq" && !!process.env.GROQ_API_KEY;
+      const on = process.env.JURO_LIVE_PROVIDER === "groq" && !!process.env.GROQ_API_KEY
+        && process.env.JURO_GROQ_FREE_CONFIRMED === "1";
       return on
         ? { allowed: true, reason: "" }
         : {
             allowed: false,
-            reason: "Live hearings are off on this server (they need JURO_LIVE_PROVIDER=groq and a Groq Free-plan GROQ_API_KEY). Sample hearings still work.",
+            reason: "Live hearings are off until the operator configures Groq and confirms a dedicated Free account without billing. Sample hearings still work.",
           };
     }
   }

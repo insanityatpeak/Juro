@@ -7,7 +7,7 @@
 
 An adversarial AI tribunal for denied health-insurance claims. Four agents argue a denial in one shared room on **Band**, a human delivers the ruling, and the turns of a recorded hearing are hash-chained so edits to them are detectable.
 
-[**Live demo →**](https://juro-roan.vercel.app) · [**The Chamber →**](https://juro-roan.vercel.app/chamber) · [**Yt Explained →**](https://www.youtube.com/watch?v=N3ys8yAu0Vw)
+[**Live demo →**](https://juro-eta.vercel.app) · [**The Chamber →**](https://juro-eta.vercel.app/chamber) · [**Yt Explained →**](https://www.youtube.com/watch?v=N3ys8yAu0Vw)
 
 Winner @ [**Hackdays**](https://hackdays-prayagraj.devpost.com/project-gallery) . [**Impact Creation**](https://impact-creation.devpost.com/project-gallery) . [**Measure Up**](https://measureme-up.devpost.com/project-gallery) . [**Build the Future with AI — From Code to No-Code**](https://build-the-future-with-ai.devpost.com/project-gallery)
 
@@ -56,7 +56,7 @@ flowchart TB
 
 By default nothing leaves the browser: there is no hearing API call, no database and no AI model. That is what a static or serverless host (such as Vercel) serves.
 
-**Live hearings (Groq Free, opt-in).** The browser drives the debate one step at a time through a stateless `POST /api/live/step`; the server holds the Groq key, checks the turn order, uses only the bundled synthetic case, and makes one free-tier call per step. No database or worker, so it also runs on Vercel. Nothing is stored or sealed.
+**Live hearings (Groq Free, invited preview).** A tester code opens a one-hour session. The browser drives the debate through `POST /api/live/step` using server-signed continuations, never editable transcript text. The server binds the synthetic case, model and instructions to the session. Four roles use one model. No database or worker is needed; leaving or reloading ends the hearing. Duplicate suppression and admission limits are per instance, not global: keep access restricted until a shared quota/replay store is available. Signed continuations establish input provenance, not a sealed audit record or reviewer identity. See [`web/README.md`](web/README.md).
 
 **Durable hearings (local, opt-in).** With `NEXT_PUBLIC_DURABLE_HEARINGS=1` on a long-running Node server, hearings run server-side, are stored in SQLite, survive closing the tab and server restarts, and can be paused/resumed. They still replay the sample record (no paid generation). See [`web/README.md`](web/README.md).
 
@@ -90,7 +90,7 @@ Getting four independent models to run a clean debate was the hard part. On the 
 |---|---|
 | Front end | Next.js 16 (App Router), React 19, Tailwind v4, Motion, Lenis |
 | Durable hearings (local, opt-in) | SQLite via `better-sqlite3`, in-process worker |
-| Live hearings (opt-in) | Groq free tier (`openai/gpt-oss-20b` debaters, `openai/gpt-oss-120b` chair by default) |
+| Live hearings (invited preview) | Groq Free account; one `openai/gpt-oss-20b` model for all roles by default |
 | Voice | Browser speech synthesis (Web Speech API) |
 | Agents (Band path; model calls disabled) | Python, `band-sdk` (Band), LangGraph; Anthropic Claude calls are blocked (no paid services) |
 | Deploy | Static/serverless host for sample playback (e.g. Vercel); durable hearings need a long-running Node server |

@@ -9,7 +9,7 @@ Juro is an adversarial AI tribunal for denied health-insurance claims. Four agen
 The repo has two independent halves that both produce the same output shape (a **transcript**):
 
 - `web/` — Next.js 16 app. The landing page and the **Chamber** (`/chamber`). By default the Chamber replays bundled, pre-written **sample** hearings entirely in the browser (`web/src/lib/useSampleHearing.ts`): no API call, no database. Opt-in **durable hearings** (`NEXT_PUBLIC_DURABLE_HEARINGS=1`, local long-running Node only) run server-side in SQLite (`web/src/lib/hearings/*`, `/api/hearings*`, `useBackgroundHearing.ts`) and also replay samples.
-- **Live hearings (opt-in):** Groq's free tier only, via the stateless `POST /api/live/step` (`web/src/lib/liveStep.ts`, `useLiveBrowserHearing.ts`): the browser holds the transcript, the server validates it against `TURN_PLAN`, makes one Groq call per step. Enabled by server env `JURO_LIVE_PROVIDER=groq` + `GROQ_API_KEY` (dedicated Free-plan account, no payment method) and shown in the UI with `NEXT_PUBLIC_LIVE_HEARINGS=1`. Quota exhaustion pauses (`SourceError` kind `"pause"`); never add a paid fallback. Sample replay stays the default.
+- **Live hearings (invited preview):** Groq Free only. `/api/live/session` requires `LIVE_TESTER_CODE` and issues a one-hour HMAC continuation signed with a separate `LIVE_SESSION_SECRET`. `/api/live/step` accepts only that continuation; never expose `parseLiveStep` to client-written turns. Tokens bind the case/evidence/prompts/plan, model, transcript and expiry. One `GROQ_MODEL` (default `openai/gpt-oss-20b`) serves all roles. Server opt-in requires `JURO_LIVE_PROVIDER=groq`, `GROQ_API_KEY`, and operator assertion `JURO_GROQ_FREE_CONFIRMED=1`; the UI flag is `NEXT_PUBLIC_LIVE_HEARINGS=1`. Duplicate suppression, retry bounds and five-session daily admission are per instance only. Keep access restricted until a shared quota/replay store exists. Leaving/reloading ends the hearing; no durable record. Sample replay remains default. See `web/README.md`.
 - **Hard rule: no paid services.** `web/src/lib/providers.ts` keeps Anthropic and Deepgram off; an API key must never enable a paid call, and there is no paid fallback. The Python side mirrors this in `backend/src/juro/providers.py`: `require_provider("anthropic")` runs before every model call in `generate.py` and before the Band agents build their LLM, so those commands refuse to run (`backend/tests/test_providers.py`).
 - `backend/` — Python. The **Band tribunal runtime**: the same four roles run as separate OS processes, each its own Band agent connected over WebSocket to one shared room, coordinating by `@mentioning` each other. This is the actual multi-agent (Band) submission path.
 
@@ -60,7 +60,7 @@ The Band SDK pins a private git submodule pip can't clone directly — install i
 
 Case ids: `mri-erisa`, `pet-oncology`, `snf-jimmo` (defined in `backend/src/juro/cases.py`).
 
-The web half has tests for the durable-hearing store/runner, provider controls and request validation (`npm test`). The backend has none despite `pytest`/`pytest-asyncio` being listed as dev dependencies; sanity-check it end-to-end: `python -m juro.generate` (check the transcript JSON and that `auditRoot` validates), or the four `agents/*.py` processes plus `band_runner case`/`export` for the Band relay path.
+The web tests cover durable store/runner behavior, provider controls, signed live sessions and request validation (`npm test`). Backend tests (`python -m pytest tests`) prove Anthropic remains blocked. Do not run paid generation to verify the app.
 
 ## Architecture
 
@@ -85,7 +85,7 @@ Band agents speak only by calling the `band_send_message` tool — there's no au
 This is load-bearing for reliability; when modifying agent behavior, keep the deterministic relay guarantee intact rather than trusting the model to self-orchestrate.
 
 ### Cross-model panel
-The three debaters (`advocate`, `scrutinizer`, `evidence`) run on a fast/light model (`claude-haiku-4-5`); the `adjudicator` (chair) runs on a heavier model (`claude-sonnet-4-6`) since weighing both sides and ruling carries the most reasoning. This split is defined via `DEFAULT_MODEL`/`ADJUDICATOR_MODEL` in `roles.py` (env-overridable: `VERDICT_DEFAULT_MODEL`, `VERDICT_ADJUDICATOR_MODEL`), and those Anthropic calls are blocked by `backend/src/juro/providers.py`. On the web side the same light/heavy split uses Groq free-tier models from `web/src/lib/live.ts` (`GROQ_DEBATER_MODEL`, `GROQ_CHAIR_MODEL`).
+The legacy Python panel specifies Haiku/Sonnet, but Anthropic calls are blocked by `backend/src/juro/providers.py`. The web preview uses one verified Groq Free model for all four role prompts (`GROQ_MODEL`, default `openai/gpt-oss-20b`). Do not describe it as a cross-model tribunal.
 
 ### Shared role prompts
 `roles.py`'s `SHARED_RULES` + per-role `SYSTEM_PROMPTS` define each agent's voice once; both the local generator and the Band agents build on top of them (Band agents additionally append `band_section(role)` for the relay/handoff protocol). Keep `roles.py` and `web/src/lib/roles.ts` prompt content in sync when changing agent behavior, since the two runners must debate identically.
