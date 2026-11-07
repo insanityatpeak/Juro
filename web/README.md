@@ -7,25 +7,43 @@ npm install
 npm run dev      # http://localhost:3000
 npm run build
 npm run lint
-npm test         # durable-hearing store, runner, provider and request-validation tests
+npm test         # durable-hearing store/runner, Groq provider, live-step and request-validation tests
 ```
 
 ## No paid services
 
-The app makes no paid API calls. Both provider controls in `src/lib/providers.ts` are off:
+The app makes no paid API calls. Provider controls live in `src/lib/providers.ts` and are checked immediately before every call, including retries and queued work:
 
-| Control | Effect |
+| Provider | Status |
 |---|---|
-| `generation` | No AI model is called. Every hearing replays the bundled sample record (`src/data/cases.ts`). Checked inside every provider call, so retries and queued work stop too. |
-| `tts` | `/api/speak` returns `503 provider_disabled`. **Listen** uses the browser's speech synthesis instead. |
+| `anthropic` | Off, always. `ANTHROPIC_API_KEY` is ignored. |
+| `deepgram` | Off, always. `/api/speak` returns `503 provider_disabled`; **Listen** uses the browser's speech synthesis. |
+| `groq` | Off unless the server sets `JURO_LIVE_PROVIDER=groq` **and** `GROQ_API_KEY`. Free tier only. |
 
-API keys (`ANTHROPIC_API_KEY`, `DEEPGRAM_API_KEY`) are ignored; setting one does not enable anything.
+## Live hearings (Groq Free, opt-in)
+
+Sample replay stays the default. To offer a live hearing:
+
+1. Create a **dedicated Groq account on the Free plan** with **no payment method and no paid upgrade**, so usage cannot be billed. Create an API key there.
+2. On that account's limits page, confirm the models are available on the Free plan: by default `openai/gpt-oss-20b` (debaters) and `openai/gpt-oss-120b` (chair). Override with `GROQ_DEBATER_MODEL` / `GROQ_CHAIR_MODEL`.
+3. Set server env: `JURO_LIVE_PROVIDER=groq`, `GROQ_API_KEY=...` (server-only; never `NEXT_PUBLIC_`).
+4. Set `NEXT_PUBLIC_LIVE_HEARINGS=1` at build time to show "Run a live hearing instead" on the case intro.
+
+How it runs (works on Vercel/serverless): the browser drives the hearing one step at a time via `POST /api/live/step` with `{ caseId, turns }`. The server keeps no state and needs no database or worker. Each request is checked against the fixed turn plan, uses only the bundled synthetic case, makes one Groq call, and returns the next turn or the final recommendation. `GET /api/live` reports whether live is available (never the key).
+
+- **Quota used up** (Groq 429 for a daily limit, or a long `retry-after`): the hearing **pauses**; **Resume** continues from the next turn. Short per-minute limits are retried with backoff. There is **no paid fallback**.
+- **Pause**: the in-flight step finishes and is kept, then it stops. If that step fails, it pauses without retrying. A completed final recommendation ends the hearing.
+- **Nothing is stored or sealed**: leaving the page ends the hearing (the request in flight is aborted). The ruling stays in that browser.
+- **Recommendations**: a malformed model answer is retried, never defaulted to a decision. No model "confidence" is shown.
+- **Abuse**: a best-effort per-IP limit (`LIVE_STEPS_PER_MINUTE`, default 20) applies per server instance. The real ceiling is the free quota, so a heavy user can exhaust it for everyone, but cannot cause a charge.
+
+`GROQ_BASE_URL` overrides the endpoint for local testing against a mock only.
 
 ## Two hearing modes
 
 **Sample playback (default).** The Chamber replays a sample hearing entirely in the browser: no hearing API call, no database, nothing saved. Leaving the page ends it, and the reviewer's ruling stays in that browser. This is what a static/serverless deployment serves. With the flag off, every `/api/hearings*` route returns `404 durable_hearings_disabled` and SQLite is never loaded.
 
-**Durable hearings (opt-in, local).** Set `NEXT_PUBLIC_DURABLE_HEARINGS=1` (in `.env.local`, then restart or rebuild; it is inlined at build time). Hearings then run on the server and are stored in SQLite (`.data/hearings.db`, gitignored), survive closing the tab and server restarts, and can be reopened at `/chamber/<id>`. They need a long-running Node server (`npm run dev`, or `npm run build && npm start`), not a serverless host.
+**Durable hearings (opt-in, local).** Set `NEXT_PUBLIC_DURABLE_HEARINGS=1` (in `.env.local`, then restart or rebuild; it is inlined at build time). Hearings then run on the server and are stored in SQLite (`.data/hearings.db`, gitignored), survive closing the tab and server restarts, and can be reopened at `/chamber/<id>`. They need a long-running Node server (`npm run dev`, or `npm run build && npm start`), not a serverless host. Durable hearings replay the sample unless `HEARING_MODE=live` is also set and the Groq provider is enabled.
 
 | State | Meaning |
 |---|---|

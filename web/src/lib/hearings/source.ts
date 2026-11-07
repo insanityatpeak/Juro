@@ -1,12 +1,16 @@
+import { groqBaseUrl, liveModels, LIVE_PROVIDER_LABEL } from "../live";
 import { providerPolicy, type ProviderPolicy } from "../providers";
-import { MODEL_FOR, SYSTEM_PROMPTS, TURN_PLAN, VERDICT_MODEL } from "../roles";
+import { SYSTEM_PROMPTS, TURN_PLAN, type Role } from "../roles";
 import type { CaseEntry, Faction, TurnType, Verdict } from "../types";
 import type { HearingMode, StoredTurn } from "./types";
 
-/** transient = worth retrying; permanent = retrying the same request will not help. */
+/**
+ * transient = worth retrying; permanent = retrying the same request will not help;
+ * pause = stop now and let the reviewer resume later (e.g. the free-tier quota is used up).
+ */
 export class SourceError extends Error {
   constructor(
-    public kind: "transient" | "permanent",
+    public kind: "transient" | "permanent" | "pause",
     public code: string,
     message: string,
     public retryAfterMs?: number,
@@ -25,10 +29,13 @@ export interface GeneratedTurn {
   durationMs: number;
 }
 
+/** A turn already on the record, as the generator needs it. */
+export type PriorTurn = Pick<StoredTurn, "agent" | "text">;
+
 export interface TurnContext {
   entry: CaseEntry;
   seq: number; // 1-based position of the turn being generated
-  turns: StoredTurn[]; // the turns already on the record
+  turns: PriorTurn[]; // the turns already on the record
 }
 
 /** Where turns come from. The runner only talks to this, so tests can swap in a flaky one. */
@@ -36,13 +43,12 @@ export interface TurnSource {
   mode: HearingMode;
   totalTurns(entry: CaseEntry): number;
   generateTurn(ctx: TurnContext): Promise<GeneratedTurn>;
-  generateVerdict(entry: CaseEntry, turns: StoredTurn[]): Promise<Verdict>;
+  generateVerdict(entry: CaseEntry, turns: PriorTurn[]): Promise<Verdict>;
 }
 
-const ANTHROPIC = "https://api.anthropic.com/v1/messages";
-const CALL_TIMEOUT_MS = 20000;
+const CALL_TIMEOUT_MS = 25000;
 const VALID_ADDRESSES = new Set<Faction>(["advocate", "scrutinizer", "evidence", "adjudicator", "human"]);
-const estDur = (t: string) => Math.max(3500, Math.min(8000, t.length * 45));
+export const estDur = (t: string) => Math.max(3500, Math.min(8000, t.length * 45));
 
 function brief(entry: CaseEntry): string {
   const c = entry.transcript.case;
@@ -57,7 +63,7 @@ function brief(entry: CaseEntry): string {
   );
 }
 
-const soFar = (turns: StoredTurn[]) =>
+const soFar = (turns: PriorTurn[]) =>
   turns.length ? turns.map((t) => `${t.agent.toUpperCase()}: ${t.text}`).join("\n") : "(the floor is open)";
 
 function parseJson(raw: string): Record<string, unknown> {
@@ -76,31 +82,47 @@ export interface AskDeps {
   timeoutMs: number;
   policy: () => ProviderPolicy;
   apiKey: () => string | undefined;
+  baseUrl: () => string;
+}
+
+/** Groq says when the free-tier allowance is used up for the day (vs a short per-minute limit). */
+function isQuotaExhausted(message: string, retryAfterMs: number | undefined): boolean {
+  return /per day|\bTPD\b|\bRPD\b|daily/i.test(message) || (retryAfterMs !== undefined && retryAfterMs > 60_000);
 }
 
 /**
- * One provider call. The provider policy is checked on every call (so retries and queued work
- * stop as soon as generation is disabled), and the timeout covers the whole exchange,
- * including reading the response body (success and error bodies alike).
+ * One chat call to Groq (OpenAI-compatible). The provider policy is checked on every call, so
+ * retries and queued work stop as soon as live hearings are switched off, and the timeout covers
+ * the whole exchange, including reading the response body (success and error bodies alike).
  */
 export function createAsk(deps: AskDeps) {
   return async function ask(model: string, system: string, user: string): Promise<string> {
     const policy = deps.policy();
     if (!policy.allowed) throw new SourceError("permanent", "provider_disabled", policy.reason);
     const key = deps.apiKey();
-    if (!key) throw new SourceError("permanent", "auth_failed", "ANTHROPIC_API_KEY is not set on the server.");
+    if (!key) throw new SourceError("permanent", "auth_failed", "GROQ_API_KEY is not set on the server.");
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), deps.timeoutMs);
     const timedOut = () =>
       new SourceError("transient", "timeout", `The AI provider did not answer within ${deps.timeoutMs / 1000}s.`);
+    const reasoning = model.startsWith("openai/gpt-oss") ? { reasoning_effort: "low", include_reasoning: false } : {};
     try {
       let r: Response;
       try {
-        r = await deps.fetch(ANTHROPIC, {
+        r = await deps.fetch(`${deps.baseUrl()}/chat/completions`, {
           method: "POST",
-          headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-          body: JSON.stringify({ model, max_tokens: 400, system, messages: [{ role: "user", content: user }] }),
+          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: "system", content: system },
+              { role: "user", content: user },
+            ],
+            max_completion_tokens: 1024,
+            temperature: 0.6,
+            ...reasoning,
+          }),
           signal: controller.signal,
         });
       } catch {
@@ -108,7 +130,7 @@ export function createAsk(deps: AskDeps) {
         throw new SourceError("transient", "network", "Could not reach the AI provider.");
       }
 
-      // Read the body while the timer is still armed: a stalled body must not hold the worker.
+      // Read the body while the timer is still armed: a stalled body must not hold the caller.
       let body: unknown;
       try {
         body = await r.json();
@@ -118,11 +140,15 @@ export function createAsk(deps: AskDeps) {
       }
 
       if (!r.ok) {
-        const m = (body as { error?: { message?: string } } | null)?.error?.message;
-        const detail = m ? ` (${String(m).slice(0, 160)})` : "";
+        const m = String((body as { error?: { message?: string } } | null)?.error?.message ?? "");
+        const detail = m ? ` (${m.slice(0, 160)})` : "";
         if (r.status === 429) {
           const ra = Number(r.headers.get("retry-after"));
-          throw new SourceError("transient", "rate_limited", "The AI provider is rate limiting requests.", Number.isFinite(ra) && ra > 0 ? ra * 1000 : undefined);
+          const retryAfterMs = Number.isFinite(ra) && ra > 0 ? ra * 1000 : undefined;
+          if (isQuotaExhausted(m, retryAfterMs)) {
+            throw new SourceError("pause", "quota_exhausted", `The ${LIVE_PROVIDER_LABEL} quota is used up for now.${detail}`, retryAfterMs);
+          }
+          throw new SourceError("transient", "rate_limited", "The AI provider is rate limiting requests.", retryAfterMs);
         }
         if (r.status === 401 || r.status === 403) {
           throw new SourceError("permanent", "auth_failed", `The AI provider rejected the API key (HTTP ${r.status}).${detail}`);
@@ -132,9 +158,9 @@ export function createAsk(deps: AskDeps) {
         }
         throw new SourceError("permanent", "request_rejected", `The AI provider rejected the request (HTTP ${r.status}).${detail}`);
       }
-      if (!body) throw new SourceError("transient", "bad_output", "The AI provider returned an unreadable response.");
-      const d = body as { content?: { type: string; text?: string }[] };
-      return (d.content || []).filter((b) => b.type === "text").map((b) => b.text || "").join("").trim();
+      const content = (body as { choices?: { message?: { content?: string | null } }[] } | null)?.choices?.[0]?.message?.content;
+      if (typeof content !== "string") throw new SourceError("transient", "bad_output", "The AI provider returned an unreadable response.");
+      return content.trim();
     } finally {
       clearTimeout(timer);
     }
@@ -144,49 +170,60 @@ export function createAsk(deps: AskDeps) {
 const ask = createAsk({
   fetch: (...a) => fetch(...a),
   timeoutMs: CALL_TIMEOUT_MS,
-  policy: () => providerPolicy("generation"),
-  apiKey: () => process.env.ANTHROPIC_API_KEY,
+  policy: () => providerPolicy("groq"),
+  apiKey: () => process.env.GROQ_API_KEY,
+  baseUrl: groqBaseUrl,
 });
 
-export const liveSource: TurnSource = {
-  mode: "live",
-  totalTurns: () => TURN_PLAN.length,
+const modelFor = (role: Role) => (role === "adjudicator" ? liveModels().chair : liveModels().debater);
 
-  async generateTurn({ entry, seq, turns }) {
-    const [role, kind] = TURN_PLAN[seq - 1];
-    const validIds = entry.transcript.evidence.map((e) => e.id);
-    const user =
-      `${brief(entry)}\n\nDEBATE SO FAR:\n${soFar(turns)}\n\n` +
-      `It is your turn (${role}, ${kind}). Valid evidence ids: ${validIds.join(", ")}.\n` +
-      'Respond ONLY with compact JSON: {"text":"<1-3 sentences>",' +
-      '"addressedTo":"<advocate|scrutinizer|evidence|adjudicator|human|null>",' +
-      '"evidenceRefs":["EX-..",...]}';
-    const data = parseJson(await ask(MODEL_FOR[role], SYSTEM_PROMPTS[role], user));
-    const text = String(data.text || "").trim();
-    if (!text) throw new SourceError("transient", "bad_output", "The model returned an empty turn.");
-    const refs = (Array.isArray(data.evidenceRefs) ? data.evidenceRefs : []).filter((r): r is string => validIds.includes(r as string));
-    const addressedTo = VALID_ADDRESSES.has(data.addressedTo as Faction) ? (data.addressedTo as Faction) : null;
-    return { agent: role, type: kind as TurnType, text, addressedTo, evidenceRefs: refs, durationMs: estDur(text) };
-  },
+/** Build the live source around any `ask` (tests pass a fake). */
+export function createLiveSource(askFn: typeof ask): TurnSource {
+  return {
+    mode: "live",
+    totalTurns: () => TURN_PLAN.length,
 
-  async generateVerdict(entry, turns) {
-    const user =
-      `${brief(entry)}\n\nFULL DEBATE:\n${soFar(turns)}\n\n` +
-      "You are the human medical reviewer delivering the FINAL verdict. " +
-      'Respond ONLY with JSON: {"decision":"OVERTURNED|UPHELD","rationale":"<1-2 sentences>","confidence":<0..1>}';
-    const vd = parseJson(
-      await ask(VERDICT_MODEL, "You weigh both sides fairly and decide. Patients deserve a defense; insurers deserve rigor.", user),
-    );
-    const decision = vd.decision === "OVERTURNED" || vd.decision === "UPHELD" ? vd.decision : "OVERTURNED";
-    const conf = Number(vd.confidence);
-    return {
-      decision,
-      rationale: String(vd.rationale || ""),
-      by: entry.transcript.verdict.by,
-      confidence: Number.isFinite(conf) ? conf : 0.85,
-    };
-  },
-};
+    async generateTurn({ entry, seq, turns }) {
+      const step = TURN_PLAN[seq - 1];
+      if (!step) throw new SourceError("permanent", "plan_mismatch", `There is no turn ${seq} in the hearing plan.`);
+      const [role, kind] = step;
+      const validIds = entry.transcript.evidence.map((e) => e.id);
+      const user =
+        `${brief(entry)}\n\nDEBATE SO FAR:\n${soFar(turns)}\n\n` +
+        `It is your turn (${role}, ${kind}). Valid evidence ids: ${validIds.join(", ")}.\n` +
+        'Respond ONLY with compact JSON: {"text":"<1-3 sentences>",' +
+        '"addressedTo":"<advocate|scrutinizer|evidence|adjudicator|human|null>",' +
+        '"evidenceRefs":["EX-..",...]}';
+      const data = parseJson(await askFn(modelFor(role), SYSTEM_PROMPTS[role], user));
+      const text = typeof data.text === "string" ? data.text.trim().slice(0, 800) : "";
+      if (!text) throw new SourceError("transient", "bad_output", "The model returned an empty turn.");
+      const refs = (Array.isArray(data.evidenceRefs) ? data.evidenceRefs : []).filter((r): r is string => validIds.includes(r as string));
+      const addressedTo = VALID_ADDRESSES.has(data.addressedTo as Faction) ? (data.addressedTo as Faction) : null;
+      return { agent: role, type: kind as TurnType, text, addressedTo, evidenceRefs: [...new Set(refs)], durationMs: estDur(text) };
+    },
+
+    /** The AI recommendation. A malformed answer is retried, never defaulted to a decision. */
+    async generateVerdict(entry, turns) {
+      const chair = liveModels().chair;
+      const user =
+        `${brief(entry)}\n\nFULL DEBATE:\n${soFar(turns)}\n\n` +
+        "Recommend a decision for the human reviewer, who makes the final call. " +
+        'Respond ONLY with JSON: {"decision":"OVERTURNED|UPHELD","rationale":"<1-2 sentences>"}';
+      const vd = parseJson(
+        await askFn(chair, "You weigh both sides fairly and recommend. Patients deserve a defense; insurers deserve rigor.", user),
+      );
+      if (vd.decision !== "OVERTURNED" && vd.decision !== "UPHELD") {
+        throw new SourceError("transient", "bad_output", "The model did not give a valid recommendation.");
+      }
+      const rationale = typeof vd.rationale === "string" ? vd.rationale.trim().slice(0, 600) : "";
+      if (!rationale) throw new SourceError("transient", "bad_output", "The model gave no rationale.");
+      // No confidence: a model-reported number is not a calibrated probability.
+      return { decision: vd.decision, rationale, by: `AI recommendation · ${LIVE_PROVIDER_LABEL} · ${chair}` };
+    },
+  };
+}
+
+export const liveSource: TurnSource = createLiveSource(ask);
 
 /** No API key needed: replays the bundled case through the same background pipeline. */
 export const sampleSource: TurnSource = {
@@ -197,6 +234,7 @@ export const sampleSource: TurnSource = {
     const delay = Number(process.env.HEARING_SAMPLE_DELAY_MS ?? 1500);
     if (delay > 0) await new Promise((r) => setTimeout(r, delay));
     const t = entry.transcript.turns[seq - 1];
+    if (!t) throw new SourceError("permanent", "plan_mismatch", `There is no turn ${seq} in the sample record.`);
     return {
       agent: t.agent,
       type: t.type,
@@ -212,10 +250,12 @@ export const sampleSource: TurnSource = {
   },
 };
 
-/** New hearings are live only if the generation control allows it; an API key alone never does. */
+/**
+ * Durable hearings replay the sample unless HEARING_MODE=live is set AND the Groq free-tier
+ * provider is enabled. An API key alone never makes a hearing live.
+ */
 export function pickMode(): HearingMode {
-  if (process.env.HEARING_MODE === "sample") return "sample";
-  return providerPolicy("generation").allowed && process.env.ANTHROPIC_API_KEY ? "live" : "sample";
+  return process.env.HEARING_MODE === "live" && providerPolicy("groq").allowed ? "live" : "sample";
 }
 
 export const getSource = (mode: HearingMode): TurnSource => (mode === "live" ? liveSource : sampleSource);

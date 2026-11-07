@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { HearingTranscript } from "@/components/HearingTranscript";
 import { useBackgroundHearing, type HearingState } from "@/lib/useBackgroundHearing";
+import { useLiveBrowserHearing } from "@/lib/useLiveBrowserHearing";
 import { useSampleHearing } from "@/lib/useSampleHearing";
 import { useVoice } from "@/lib/useVoice";
 import type { CaseEntry, Transcript } from "@/lib/types";
@@ -26,12 +27,29 @@ export function Hearing({
 }
 
 /** Sample hearing played entirely in this browser: no server, no database, nothing recorded. */
-export function SampleHearing({ entry, onBack }: { entry: CaseEntry; onBack: () => void }) {
+export function SampleHearing({ entry, onBack, onSwitch }: { entry: CaseEntry; onBack: () => void; onSwitch?: () => void }) {
   const pb = useSampleHearing(entry);
-  return <HearingRoom entry={entry} onBack={onBack} pb={pb} />;
+  return <HearingRoom entry={entry} onBack={onBack} pb={pb} onSwitch={onSwitch} />;
 }
 
-function HearingRoom({ entry, onBack, pb }: { entry: CaseEntry; onBack: () => void; pb: HearingState }) {
+/** Live hearing on Groq's free tier, driven step by step from this browser. Nothing is stored. */
+export function LiveHearing({ entry, onBack, onSwitch }: { entry: CaseEntry; onBack: () => void; onSwitch?: () => void }) {
+  const pb = useLiveBrowserHearing(entry);
+  return <HearingRoom entry={entry} onBack={onBack} pb={pb} onSwitch={onSwitch} />;
+}
+
+function HearingRoom({
+  entry,
+  onBack,
+  pb,
+  onSwitch,
+}: {
+  entry: CaseEntry;
+  onBack: () => void;
+  pb: HearingState;
+  /** Offered on the intro screen: switch between sample replay and a live hearing. */
+  onSwitch?: () => void;
+}) {
   const transcript: Transcript = entry.transcript;
   const cf = transcript.case;
 
@@ -120,7 +138,14 @@ function HearingRoom({ entry, onBack, pb }: { entry: CaseEntry; onBack: () => vo
           ) : pb.loading ? (
             <Message title="Loading the hearing…" body="" />
           ) : pb.phase === "idle" ? (
-            <Intro onStart={pb.start} starting={pb.starting} error={pb.startError} backend={pb.backend} />
+            <Intro
+              onStart={pb.start}
+              starting={pb.starting}
+              error={pb.startError}
+              backend={pb.backend}
+              live={pb.live}
+              onSwitch={onSwitch}
+            />
           ) : (
             <>
               <div className="scroll-fade min-h-0 flex-1 overflow-y-auto px-6 py-6">
@@ -132,6 +157,7 @@ function HearingRoom({ entry, onBack, pb }: { entry: CaseEntry; onBack: () => vo
                   onCite={(id) => setFocus(id)}
                   showBench
                   live={pb.live}
+                  engines={pb.engines}
                 />
               </div>
               <Transport pb={pb} />
@@ -173,23 +199,34 @@ function Intro({
   starting,
   error,
   backend,
+  live,
+  onSwitch,
 }: {
   onStart: () => void;
   starting: boolean;
   error: string | null;
   backend: "server" | "browser";
+  live: boolean;
+  onSwitch?: () => void;
 }) {
+  const text =
+    backend === "server"
+      ? "Convene the tribunal and hear both sides argue from the record. This sample hearing runs on the server, so you can leave and come back to it. You deliver the ruling."
+      : live
+        ? "Live hearing: the four agents argue this synthetic case now, on Groq's free tier. If the free quota runs out the hearing pauses and you can resume later. Leaving the page ends it, and nothing is saved. You deliver the ruling."
+        : "Replay a sample hearing: both sides argue from the record in pre-written turns, played in your browser. Nothing is sent or saved. You deliver the ruling.";
   return (
     <div className="mx-auto flex max-w-md flex-1 flex-col items-center justify-center px-6 py-20 text-center">
       <div className="display text-3xl text-cchalk">A claim was denied.</div>
-      <p className="mt-3 text-[15px] leading-relaxed text-cchalkdim">
-        {backend === "server"
-          ? "Convene the tribunal and hear both sides argue from the record. This sample hearing runs on the server, so you can leave and come back to it. You deliver the ruling."
-          : "Replay a sample hearing: both sides argue from the record in pre-written turns, played in your browser. Nothing is sent or saved. You deliver the ruling."}
-      </p>
+      <p className="mt-3 text-[15px] leading-relaxed text-cchalkdim">{text}</p>
       <button onClick={onStart} disabled={starting} className="btn btn-brass mt-7 disabled:opacity-50">
-        {starting ? "Convening…" : "Convene the tribunal"}
+        {starting ? "Convening…" : live ? "Convene a live hearing" : "Convene the tribunal"}
       </button>
+      {onSwitch && (
+        <button onClick={onSwitch} className="btn btn-line-ink mt-3 !px-3 !py-1.5 !text-[12px]">
+          {live ? "Replay the sample instead" : "Run a live hearing instead (Groq free tier)"}
+        </button>
+      )}
       {error && <p className="mt-4 text-[13px] text-coxblood">{error}</p>}
     </div>
   );

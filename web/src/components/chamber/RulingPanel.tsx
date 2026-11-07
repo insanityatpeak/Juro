@@ -54,7 +54,7 @@ export function RulingPanel({
             ))}
           </div>
           <button onClick={() => pb.deliverVerdict(choice)} className="btn btn-brass !py-2.5 !text-[13px]">
-            {pb.backend === "browser" ? "Deliver sample ruling" : "Record ruling"}
+            {pb.backend === "server" ? "Record ruling" : pb.live ? "Deliver ruling" : "Deliver sample ruling"}
           </button>
           {pb.rulingError && <p className="text-[12px] text-coxblood">{pb.rulingError}</p>}
         </div>
@@ -72,7 +72,7 @@ export function RulingPanel({
             </div>
             <div className="mono mt-2 text-[10px] leading-relaxed text-cslate">
               {pb.backend === "browser"
-                ? "sample · kept in this browser only · not recorded or sealed"
+                ? `${pb.live ? "live hearing" : "sample"} · kept in this browser only · not recorded or sealed`
                 : `recorded from the browser that started this hearing · reviewer identity not verified${pb.auditRoot ? ` · transcript chain ${pb.auditRoot}` : ""}`}
             </div>
           </div>

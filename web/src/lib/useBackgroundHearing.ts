@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { HearingStatus, HearingView, StoredTurn } from "./hearings/types";
+import type { LiveModels } from "./live";
 import { TURN_PLAN } from "./roles";
 import type { CaseEntry, Faction, Verdict } from "./types";
 
@@ -211,6 +212,8 @@ export function useBackgroundHearing(entry: CaseEntry, initialId: string | null 
     verdict,
     humanDecision: meta?.humanDecision ?? null,
     live: meta?.mode === "live",
+    /** Model names behind a live hearing, when known (shown on the bench). */
+    engines: null as LiveModels | null,
     auditRoot: meta?.auditRoot ?? null,
     activeId: turns.length ? turns[turns.length - 1].id : null,
     progress: phase === "idle" ? 0 : status === "complete" ? 1 : Math.min(turns.length / Math.max(totalTurns, 1), 0.96),

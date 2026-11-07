@@ -268,6 +268,19 @@ test("a dead worker with a pending pause request recovers to paused, not back to
   assert.equal(v.pauseReason, "reviewer");
 });
 
+test("a used-up free quota pauses the hearing at once, without retrying", async () => {
+  const { source, calls } = fakeSource({ "turn:2": [new SourceError("pause", "quota_exhausted", "quota used up")] });
+  const { store, deps, id } = setup(source);
+  await runHearing(deps, id);
+  const v = store.view(id)!;
+  assert.equal(v.status, "paused");
+  assert.equal(v.pauseReason, "system");
+  assert.equal(v.error?.code, "quota_exhausted");
+  assert.match(v.error?.nextAction ?? "", /Resume/);
+  assert.equal(calls.filter((c) => c === "turn:2").length, 1); // no retries against an empty quota
+  assert.deepEqual(seqs(store, id), [1]);
+});
+
 test("a disabled provider fails the hearing permanently with a next action", async () => {
   const { source } = fakeSource({ "turn:1": [new SourceError("permanent", "provider_disabled", "off")] });
   const { store, deps, id } = setup(source);

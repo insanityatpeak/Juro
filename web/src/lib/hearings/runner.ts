@@ -21,11 +21,12 @@ const defaultBackoff = (attempt: number, retryAfterMs?: number) =>
   Math.min(Math.max(retryAfterMs ?? 0, 2000 * 2 ** (attempt - 1)), 30000);
 
 const PERMANENT_NEXT_ACTION: Record<string, string> = {
-  auth_failed: "Fix ANTHROPIC_API_KEY on the server, then press Retry to continue from where it stopped.",
+  auth_failed: "Fix GROQ_API_KEY on the server, then press Retry to continue from where it stopped.",
   request_rejected: "Check the model name and account access, then press Retry to continue from where it stopped.",
   case_missing: "This case no longer exists. Start a new hearing from the Chamber.",
   state_error: "Press Retry. If it fails again, start a new hearing.",
-  provider_disabled: "Live AI generation is turned off (no paid services). Start a new hearing; it replays the sample record.",
+  provider_disabled: "Live hearings are turned off on this server. Start a new hearing; it replays the sample record.",
+  plan_mismatch: "The hearing plan changed since this hearing started. Start a new hearing.",
 };
 
 function resumeNextAction(done: number, total: number): string {
@@ -35,6 +36,7 @@ function resumeNextAction(done: number, total: number): string {
 
 function exhaustedNextAction(code: string, done: number, total: number): string {
   const where = done >= total ? "the final recommendation" : `turn ${done + 1} of ${total}`;
+  if (code === "quota_exhausted") return `The free-tier quota is used up. Press Resume once it resets to continue from ${where}; turns already on the record are kept.`;
   if (code === "rate_limited") return `The AI provider is rate limiting requests. Wait a minute, then press Resume to continue from ${where}.`;
   return `A temporary problem kept happening. Press Resume to continue from ${where}; the ${done} turn${done === 1 ? "" : "s"} already on the record are kept.`;
 }
@@ -112,6 +114,11 @@ export async function runHearing(deps: RunnerDeps, id: string): Promise<void> {
           e instanceof SourceError ? e : new SourceError("transient", "internal_error", e instanceof Error ? e.message : "Unexpected error.");
         if (err.kind === "permanent") {
           store.failPermanently(id, workerId, err.code, err.message, PERMANENT_NEXT_ACTION[err.code] ?? "Press Retry to continue from where it stopped.");
+          return;
+        }
+        // e.g. the free-tier quota is used up: retrying now would only fail again. Pause; no paid fallback.
+        if (err.kind === "pause") {
+          store.pauseBySystem(id, workerId, err.code, err.message, exhaustedNextAction(err.code, done, row.total_turns));
           return;
         }
         // Pause requested while this step was in flight and it failed: pause now, do not retry.

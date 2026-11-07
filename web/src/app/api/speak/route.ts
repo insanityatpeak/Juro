@@ -9,7 +9,7 @@ const NO_STORE = { "Cache-Control": "no-store" };
 // POST { text, agent } -> audio/mpeg via Deepgram. Disabled by the TTS provider control
 // (no paid services); the Chamber reads turns aloud with the browser's own speech synthesis.
 export async function POST(req: NextRequest) {
-  const policy = providerPolicy("tts"); // checked per request, before anything else
+  const policy = providerPolicy("deepgram"); // checked per request, before anything else
   if (!policy.allowed) return NextResponse.json({ error: "provider_disabled", message: policy.reason }, { status: 503, headers: NO_STORE });
 
   const key = process.env.DEEPGRAM_API_KEY;

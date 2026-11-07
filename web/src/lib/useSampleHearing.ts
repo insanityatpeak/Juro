@@ -77,6 +77,7 @@ export function useSampleHearing(entry: CaseEntry): HearingState {
     verdict: entry.transcript.verdict, // the sample's AI recommendation; the reviewer's choice is humanDecision
     humanDecision: decision,
     live: false,
+    engines: null,
     auditRoot: null, // a browser sample is not sealed
     activeId: turns.length ? turns[turns.length - 1].id : null,
     progress: !started ? 0 : done ? 1 : Math.min(shown / Math.max(all.length, 1), 0.96),

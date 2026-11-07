@@ -9,7 +9,8 @@ Juro is an adversarial AI tribunal for denied health-insurance claims. Four agen
 The repo has two independent halves that both produce the same output shape (a **transcript**):
 
 - `web/` — Next.js 16 app. The landing page and the **Chamber** (`/chamber`). By default the Chamber replays bundled, pre-written **sample** hearings entirely in the browser (`web/src/lib/useSampleHearing.ts`): no API call, no database. Opt-in **durable hearings** (`NEXT_PUBLIC_DURABLE_HEARINGS=1`, local long-running Node only) run server-side in SQLite (`web/src/lib/hearings/*`, `/api/hearings*`, `useBackgroundHearing.ts`) and also replay samples.
-- **Hard rule: no paid services.** `web/src/lib/providers.ts` keeps AI generation and server TTS off; an API key must never enable a paid call, and there is no paid fallback. The Python side mirrors this in `backend/src/juro/providers.py`: `require_provider("anthropic")` runs before every model call in `generate.py` and before the Band agents build their LLM, so those commands refuse to run (`backend/tests/test_providers.py`).
+- **Live hearings (opt-in):** Groq's free tier only, via the stateless `POST /api/live/step` (`web/src/lib/liveStep.ts`, `useLiveBrowserHearing.ts`): the browser holds the transcript, the server validates it against `TURN_PLAN`, makes one Groq call per step. Enabled by server env `JURO_LIVE_PROVIDER=groq` + `GROQ_API_KEY` (dedicated Free-plan account, no payment method) and shown in the UI with `NEXT_PUBLIC_LIVE_HEARINGS=1`. Quota exhaustion pauses (`SourceError` kind `"pause"`); never add a paid fallback. Sample replay stays the default.
+- **Hard rule: no paid services.** `web/src/lib/providers.ts` keeps Anthropic and Deepgram off; an API key must never enable a paid call, and there is no paid fallback. The Python side mirrors this in `backend/src/juro/providers.py`: `require_provider("anthropic")` runs before every model call in `generate.py` and before the Band agents build their LLM, so those commands refuse to run (`backend/tests/test_providers.py`).
 - `backend/` — Python. The **Band tribunal runtime**: the same four roles run as separate OS processes, each its own Band agent connected over WebSocket to one shared room, coordinating by `@mentioning` each other. This is the actual multi-agent (Band) submission path.
 
 These two paths are deliberately kept in sync by sharing role prompts/turn order conceptually (`web/src/lib/roles.ts` mirrors `backend/src/juro/roles.py`), but they are separately implemented — changes to the debate flow or prompts usually need to be made in **both** places. The pairs to check whenever you touch either side:
@@ -19,7 +20,7 @@ These two paths are deliberately kept in sync by sharing role prompts/turn order
 | Role prompts / turn order | `backend/src/juro/roles.py` | `web/src/lib/roles.ts` |
 | Case data | `backend/src/juro/cases.py` | `web/src/data/cases.ts` |
 | Transcript schema | `backend/src/juro/transcript.py` | `web/src/lib/types.ts` |
-| Debate generation loop | `backend/src/juro/generate.py` | `web/src/lib/hearings/source.ts` (`liveSource`, disabled by the provider control) + `runner.ts` |
+| Debate generation loop | `backend/src/juro/generate.py` (blocked: paid) | `web/src/lib/hearings/source.ts` (`createLiveSource`, Groq free tier) driven by `liveStep.ts` (browser) or `runner.ts` (durable) |
 
 ## Commands
 
@@ -73,7 +74,7 @@ Both the Chamber and the Band runtime ultimately produce a JSON object shaped li
 `transcript.py`'s `chain_turns()` computes `hash_i = sha256(hash_{i-1} + canonical(turn_i))` over each turn in order, producing an `auditRoot`. This is the "audit-ready" property the regulated-workflow framing depends on — any edit to a past turn breaks the chain. Preserve turn ordering and canonical JSON serialization (`sort_keys=True`, compact separators) if you touch this.
 
 ### Two debate runners, one turn plan vs. one relay
-- **Local generator** (`backend/src/juro/generate.py`, mirrored by the disabled `liveSource` in `web/src/lib/hearings/source.ts`) uses the full scripted `TURN_PLAN` in `roles.py` / `roles.ts` — a fixed 10-step sequence (opening → argument → rebuttal → evidence → ... → ruling) driven by one process calling the Anthropic API in a loop and asking each model to respond with structured JSON (`{text, addressedTo, evidenceRefs}`).
+- **Local generator** (`backend/src/juro/generate.py`, mirrored by `createLiveSource` in `web/src/lib/hearings/source.ts`) uses the full scripted `TURN_PLAN` in `roles.py` / `roles.ts` — a fixed 10-step sequence (opening → argument → rebuttal → evidence → ... → ruling) driven by one process calling the Anthropic API in a loop and asking each model to respond with structured JSON (`{text, addressedTo, evidenceRefs}`).
 - **Band runtime** (`backend/src/juro/agents/*.py`, `band_runner.py`) can't use a scripted loop — Band is mention-driven and each agent is a separate process that only acts when `@mentioned`. Instead it runs a simpler fixed **relay**: `adjudicator(open) → advocate → scrutinizer → evidence → adjudicator(rule)`, defined by `RELAY_ORDER`/`NEXT_VOICE`/`HANDOFF` in `roles.py`. Each agent's Band prompt (`band_section()`) instructs it to end its turn by `@mentioning` the next voice by name.
 
 ### The relay-hardening adapter (`backend/src/juro/agents/base.py`)
@@ -84,7 +85,7 @@ Band agents speak only by calling the `band_send_message` tool — there's no au
 This is load-bearing for reliability; when modifying agent behavior, keep the deterministic relay guarantee intact rather than trusting the model to self-orchestrate.
 
 ### Cross-model panel
-The three debaters (`advocate`, `scrutinizer`, `evidence`) run on a fast/light model (`claude-haiku-4-5`); the `adjudicator` (chair) runs on a heavier model (`claude-sonnet-4-6`) since weighing both sides and ruling carries the most reasoning. This split is defined via `DEFAULT_MODEL`/`ADJUDICATOR_MODEL` in `roles.py` (env-overridable: `VERDICT_DEFAULT_MODEL`, `VERDICT_ADJUDICATOR_MODEL`) and `MODEL_FOR`/`VERDICT_MODEL` in `web/src/lib/roles.ts`.
+The three debaters (`advocate`, `scrutinizer`, `evidence`) run on a fast/light model (`claude-haiku-4-5`); the `adjudicator` (chair) runs on a heavier model (`claude-sonnet-4-6`) since weighing both sides and ruling carries the most reasoning. This split is defined via `DEFAULT_MODEL`/`ADJUDICATOR_MODEL` in `roles.py` (env-overridable: `VERDICT_DEFAULT_MODEL`, `VERDICT_ADJUDICATOR_MODEL`), and those Anthropic calls are blocked by `backend/src/juro/providers.py`. On the web side the same light/heavy split uses Groq free-tier models from `web/src/lib/live.ts` (`GROQ_DEBATER_MODEL`, `GROQ_CHAIR_MODEL`).
 
 ### Shared role prompts
 `roles.py`'s `SHARED_RULES` + per-role `SYSTEM_PROMPTS` define each agent's voice once; both the local generator and the Band agents build on top of them (Band agents additionally append `band_section(role)` for the relay/handoff protocol). Keep `roles.py` and `web/src/lib/roles.ts` prompt content in sync when changing agent behavior, since the two runners must debate identically.
