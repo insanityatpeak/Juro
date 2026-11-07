@@ -2,22 +2,20 @@
 The four tribunal agents — shared by the local generator and the Band runtime.
 
 Each agent is a distinct system prompt + role. The same roles, in the same turn
-order, run either as plain Anthropic calls (local generator) or as separate Band
-agents in one shared "tribunal" room (the submission path). Keeping the prompts
-here means both runners stay perfectly in sync.
+order, run either through the local generator or as separate Band agents in one
+shared "tribunal" room (the submission path). Keeping the prompts here means both
+runners stay perfectly in sync.
 
-Models are intentionally LIGHT (claude-haiku-4-5) to keep cost and latency low.
+Models: the Band agents run on Groq's free tier, one model for all roles (juro.llm).
+The Anthropic models below are only referenced by the local generator, whose calls
+are blocked by juro.providers (no paid services).
 """
 
 from __future__ import annotations
 
 import os
 
-# A cross-model panel on purpose: the three debaters run on a fast, light model
-# so the adversarial back-and-forth stays quick; the chair (Adjudicator) runs on
-# a heavier model because weighing both sides and writing the ruling carries the
-# most reasoning. Same prompts, different engines — heterogeneous agents in one
-# Band room, which is the whole point of Band.
+# Local generator only (blocked: paid). The Band agents use juro.llm.groq_model().
 DEFAULT_MODEL = os.environ.get("VERDICT_DEFAULT_MODEL", "claude-haiku-4-5")
 ADJUDICATOR_MODEL = os.environ.get("VERDICT_ADJUDICATOR_MODEL", "claude-sonnet-4-6")
 
@@ -86,8 +84,8 @@ def model_for(role: str) -> str:
 # answer — a turn that reasons but never calls the tool is silent). So we run the
 # hearing as a deterministic RELAY: each voice speaks once, in a fixed order, and
 # hands the floor to the next by name. No single agent has to shepherd the whole
-# debate, which is what makes it reliable. The chair (Adjudicator, on the heavier
-# model) handles the only conditional step — opening vs. ruling.
+# debate, which is what makes it reliable. The chair (Adjudicator) handles the only
+# conditional step — opening vs. ruling — tracked per room by juro.relay.
 #
 #   Adjudicator (opens) -> Advocate -> Scrutinizer -> Evidence -> Adjudicator (rules)
 #

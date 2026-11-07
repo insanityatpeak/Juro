@@ -34,7 +34,7 @@ When a claim is denied, four specialized agents take it to a tribunal in one sha
 
 They read and rebut each other instead of passing tasks down a line. A person reads the whole debate and delivers the decision. The AI argues. A human rules.
 
-> **No paid services.** Anthropic and Deepgram are switched off in code (`web/src/lib/providers.ts`), even if API keys are present. By default the Chamber replays **pre-written sample hearings**, clearly labelled as samples, and reads them aloud with the browser's built-in speech. An optional **live hearing** runs on **Groq's free tier** only (a dedicated Free-plan account with no payment method); when its quota runs out the hearing pauses, with no paid fallback. See [`web/README.md`](web/README.md). The Python/Band path is held to the same rule: its Anthropic calls are blocked in code (`backend/src/juro/providers.py`), so `python -m juro.generate` and the Band agent processes refuse to run until a free model provider is wired in.
+> **No paid services.** Anthropic and Deepgram are switched off in code (`web/src/lib/providers.ts`), even if API keys are present. By default the Chamber replays **pre-written sample hearings**, clearly labelled as samples, and reads them aloud with the browser's built-in speech. An optional **live hearing** runs on **Groq's free tier** only (a dedicated Free-plan account with no payment method); when its quota runs out the hearing pauses, with no paid fallback. See [`web/README.md`](web/README.md). The Python side follows the same rule (`backend/src/juro/providers.py`): the Band agents run on **Groq's free tier** with the same three opt-in switches, and `python -m juro.generate` stays blocked because it calls Anthropic.
 
 ## Architecture
 
@@ -73,14 +73,16 @@ flowchart LR
     Ad2 -- "ruling" --> Human
 ```
 
-Each agent is its own process that connects to Band over a WebSocket and joins one shared room. They argue by `@mentioning` each other, which is the part that needs Band: real multi-agent coordination, not a hub handing out work.
+Each agent is its own process that connects to Band over a WebSocket and joins one shared room. They argue by `@mentioning` each other, which is the part that needs Band: real multi-agent coordination, not a hub handing out work. All four agents run on one Groq free-tier model.
+
+If Groq's free quota runs out mid-hearing, the agent whose turn it is posts a `[tribunal notice]` to the reviewer and the tribunal stops; there is no paid fallback. Per-minute limits are waited out (up to two retries). When the quota resets, `@mention` that agent to resume from the same step: the Adjudicator remembers per room whether it has opened, so a resume never restarts the debate. (That memory lives in the Adjudicator process; restarting it mid-hearing forgets it, though a message from Evidence still triggers the ruling.)
 
 ## What makes it hold up
 
 Getting four independent models to run a clean debate was the hard part. On the Band path:
 
-- **A cross-model panel (Band path).** The three debaters run on a fast model (`claude-haiku-4-5`); the chair runs on a heavier one (`claude-sonnet-4-6`). The web Chamber does not call these models; it replays samples.
 - **A deterministic relay.** A mention-driven debate stalls when a model hands off to the wrong agent, and goes silent when a model returns its ruling as plain text without posting. Juro's custom LangGraph adapter forces every handoff in code and posts the model's final text itself if the send tool was skipped.
+- **Never silent, never paid.** A rate limit is waited out, a used-up free quota pauses with a notice to the reviewer, and any other failure posts a notice instead of leaving the room hanging. A failure after an agent has already posted is not retried, so turns are never duplicated.
 - **A hash-chained transcript (durable hearings and Band exports).** Each stored turn's hash covers the previous hash, so editing a stored turn breaks the chain. Limits today: the chain covers turns only (not the recommendation or ruling), there is no published checkpoint, and anyone who can rewrite the database can recompute it. Browser sample playback is not hashed or sealed.
 - **Rulings are not identity-verified.** A durable hearing's controls (pause, resume, ruling) need a token held by the browser that started it. The token authorizes the action; it does not establish who the reviewer is.
 
@@ -92,7 +94,7 @@ Getting four independent models to run a clean debate was the hard part. On the 
 | Durable hearings (local, opt-in) | SQLite via `better-sqlite3`, in-process worker |
 | Live hearings (invited preview) | Groq Free account; one `openai/gpt-oss-20b` model for all roles by default |
 | Voice | Browser speech synthesis (Web Speech API) |
-| Agents (Band path; model calls disabled) | Python, `band-sdk` (Band), LangGraph; Anthropic Claude calls are blocked (no paid services) |
+| Agents (Band path) | Python, `band-sdk` (Band), LangGraph, `langchain-groq` on Groq's free tier (one model for all four roles) |
 | Deploy | Static/serverless host for sample playback (e.g. Vercel); durable hearings need a long-running Node server |
 
 ## Repository
@@ -114,9 +116,12 @@ backend/                  Python
   src/juro/
     roles.py              the four role prompts + the Band relay protocol
     agents/               the Band agent processes (advocate, scrutinizer, …)
+    llm.py                the agents' Groq free-tier model (provider re-checked per call)
+    relay.py              rate-limit waits, quota pauses, failure notices, chair phases
+    providers.py          provider controls (Anthropic blocked, Groq Free opt-in)
     band_runner.py        register agents, submit a case, export the transcript
     band_api.py           thin async wrappers over Band's REST API
-    generate.py           run the debate locally (Anthropic only)
+    generate.py           local generator (blocked: calls Anthropic)
     transcript.py         the transcript model + the hash chain
 ```
 
@@ -142,9 +147,11 @@ pip install -e .
 
 # the Band SDK pins a private submodule, so install it from a no-submodule clone:
 git clone --depth 1 https://github.com/thenvoi/thenvoi-sdk-python.git /tmp/band-sdk
-pip install "/tmp/band-sdk[langgraph,anthropic]"
+pip install "/tmp/band-sdk[langgraph]" langchain-groq
 
-# put your Band user key + Anthropic key in backend/.env, then:
+# copy backend/.env.example to backend/.env and fill in your Band user key plus, from a
+# dedicated Groq FREE-plan account with no payment method: JURO_LIVE_PROVIDER=groq,
+# GROQ_API_KEY=..., JURO_GROQ_FREE_CONFIRMED=1. Then:
 python -m juro.band_runner setup          # register the four agents on Band
 python -m juro.agents.advocate            # start each agent (own process); they
 python -m juro.agents.scrutinizer         #   connect over WebSocket and wait to
@@ -153,7 +160,9 @@ python -m juro.agents.adjudicator
 python -m juro.band_runner brief mri-erisa  # print a case brief to paste into a room
 ```
 
-Create a room in the Band web app, add the four agents, paste the brief, and `@mention` the Adjudicator. The agents argue; you reply `OVERTURN` or `UPHOLD`.
+Create a room in the Band web app, add the four agents, paste the brief, and `@mention` the Adjudicator. The agents argue; after the Adjudicator's ruling, reply starting with `OVERTURN`, `UPHOLD` or `REMAND`. Then `python -m juro.band_runner export` writes the transcript; it reads the case from the claim id in your brief and refuses to export a hearing without a ruling and your decision.
+
+Before the first full hearing, check that your Groq Free plan lists the model (`GROQ_MODEL`, default `openai/gpt-oss-20b`) and that it calls tools reliably. If not, set `GROQ_MODEL` to another Free-plan model.
 
 ## Grounded in real law
 

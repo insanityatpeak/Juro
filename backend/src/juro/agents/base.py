@@ -8,6 +8,8 @@ debate is adversarial without any one agent shepherding the whole flow.
 Built on band-sdk 1.0 with a relay-hardened LangGraph adapter: because the SDK
 agent speaks only by calling band_send_message, _build_relay_adapter() guarantees
 a turn still posts even if the model returns a plain answer instead of a tool call.
+Agents run on Groq's free tier (juro.llm); juro.relay handles rate limits, quota
+pauses and failures so the room is never left silent.
 """
 
 from __future__ import annotations
@@ -100,16 +102,12 @@ class VerdictAgent(ABC):
         return agent
 
     def _create_llm(self):
-        # Juro uses no paid services: the Band agents' model (Anthropic) is disabled, so an agent
-        # process refuses to start rather than making paid calls. Checked before the client exists.
-        from juro.providers import require_provider
+        # Juro uses no paid services: the agents run on Groq's free tier only, with the provider
+        # control re-checked before every model call. Anthropic stays blocked.
+        _load_env()
+        from juro.llm import create_chat_model
 
-        require_provider("anthropic")
-        from langchain_anthropic import ChatAnthropic
-        from juro.roles import model_for
-
-        model = model_for(self.role)
-        return ChatAnthropic(model=model, max_tokens=400)
+        return create_chat_model()
 
     def _build_relay_adapter(self):
         """A LangGraph adapter that makes the relay DETERMINISTIC and never silent.
@@ -136,6 +134,7 @@ class VerdictAgent(ABC):
         """
         from band.adapters import LangGraphAdapter
         from langgraph.checkpoint.memory import InMemorySaver
+        from juro.relay import AdjudicatorPhases, run_turn
         from juro.roles import NEXT_VOICE
 
         role = self.role
@@ -169,26 +168,20 @@ class VerdictAgent(ABC):
                     return name
             return None
 
-        async def _forced_mentions(msg, tools) -> list[str]:
+        phases = AdjudicatorPhases()
+
+        async def _forced_mentions(move: str | None, tools) -> list[str]:
             # Debaters always hand to their single fixed successor.
             if role in NEXT_VOICE:
                 return [NEXT_VOICE[role]]
-            # The chair opens to the Advocate, and rules to the human once Evidence
-            # has reported (Evidence is the only agent that hands back to the chair).
+            # The chair opens to the Advocate, and rules to the human reviewer once it has opened.
             if role == "adjudicator":
-                sender = (getattr(msg, "sender_name", "") or "").lower()
-                if "evidence" in sender:
+                if move == "rule":
                     human = await _human_name(tools)
                     if not human:
-                        # Don't silently loop the tribunal back to Advocate — that
-                        # would restart the debate instead of delivering the ruling.
-                        # Leave the mention unforced (fall back to whatever the
-                        # model itself chose) and log loudly so this is debuggable.
-                        logger.error(
-                            "[RELAY] Could not resolve the human reviewer to deliver "
-                            "the ruling to — leaving the mention unforced rather than "
-                            "restarting the tribunal at Advocate."
-                        )
+                        # Don't loop the tribunal back to Advocate (that restarts the debate) and
+                        # don't self-mention (that loops the chair). Leave it to the model's choice.
+                        logger.error("[RELAY] Could not resolve the human reviewer to deliver the ruling to.")
                         return []
                     return [human]
                 return ["Advocate"]
@@ -228,44 +221,55 @@ class VerdictAgent(ABC):
                 # turn, so two messages for the same room arriving back-to-back
                 # must not interleave and clobber each other's in-flight state.
                 async with self._lock_for(room_id):
-                    self._sent_this_turn[room_id] = False
-                    self._final_text[room_id] = ""
-
-                    forced = await _forced_mentions(msg, tools)
+                    move = None
+                    if role == "adjudicator":
+                        move = phases.next_move(room_id, getattr(msg, "sender_name", "") or "")
+                    forced = await _forced_mentions(move, tools)
                     orig_send = tools.send_message
 
                     async def _send(content, mentions=None):
                         # Deterministic handoff: ignore the model's choice of mention.
                         return await orig_send(content, mentions=forced or mentions)
 
-                    tools.send_message = _send  # execute_tool_call does getattr(self,"send_message")
-                    try:
-                        result = await super().on_message(
-                            msg, tools, history, participants_msg, contacts_msg,
-                            is_session_bootstrap=is_session_bootstrap, room_id=room_id,
-                        )
-                    finally:
-                        tools.send_message = orig_send
+                    def _reset():
+                        self._sent_this_turn[room_id] = False
+                        self._final_text[room_id] = ""
 
-                    if not self._sent_this_turn.get(room_id) and self._final_text.get(room_id):
-                        text = self._final_text[room_id]
-                        logger.info(
-                            "[RELAY] %s gave a final answer without band_send_message; "
-                            "posting it (%d chars, -> %s) so the room is never left silent.",
-                            agent_label, len(text), forced or ["(none)"],
-                        )
+                    outcome: dict = {}
+
+                    async def _invoke():
+                        tools.send_message = _send  # execute_tool_call does getattr(self,"send_message")
                         try:
-                            await orig_send(text, mentions=forced or ["Adjudicator"])
-                        except Exception:
-                            logger.exception("[RELAY] fallback send_message failed")
-                    return result
+                            outcome["result"] = await super(RelayLangGraphAdapter, self).on_message(
+                                msg, tools, history, participants_msg, contacts_msg,
+                                is_session_bootstrap=is_session_bootstrap, room_id=room_id,
+                            )
+                        finally:
+                            tools.send_message = orig_send
+
+                    spoke = await run_turn(
+                        label=agent_label,
+                        invoke=_invoke,
+                        reset=_reset,
+                        sent=lambda: bool(self._sent_this_turn.get(room_id)),
+                        final_text=lambda: self._final_text.get(room_id, ""),
+                        send=lambda text, mentions: orig_send(text, mentions=mentions),
+                        forced=forced,
+                        reviewer=lambda: _human_name(tools),
+                    )
+                    # Only a turn that actually reached the room advances the chair's phase, so a
+                    # paused or failed turn resumes at the same step when the reviewer @mentions it.
+                    if spoke and move:
+                        phases.record(room_id, move)
+                    return outcome.get("result")
 
         return RelayLangGraphAdapter(
             llm=self._create_llm(),
             checkpointer=InMemorySaver(),
             custom_section=self.build_prompt(),
             additional_tools=self.additional_tools,
-            recursion_limit=8,
+            # A turn needs model -> send tool -> model; 4 leaves slack while capping free-tier usage.
+            recursion_limit=4,
         )
 
     async def run(self) -> None:
