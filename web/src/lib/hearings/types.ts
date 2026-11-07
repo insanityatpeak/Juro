@@ -30,6 +30,10 @@ export interface HearingRow {
   human_decided_at: number | null;
   worker_id: string | null;
   heartbeat_at: number | null;
+  /** 1 while a reviewer pause waits for the active step to finish and be saved. */
+  pause_requested: number;
+  /** sha256 of the creator's control token; null for hearings created before access control. */
+  control_token_hash: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -49,6 +53,10 @@ export interface HearingView {
   mode: HearingMode;
   status: HearingStatus;
   pauseReason: PauseReason | null;
+  /** A reviewer asked to pause; the active step is finishing and will be saved first. */
+  pauseRequested: boolean;
+  /** False for hearings created before control tokens existed: nobody can control them; view only. */
+  controllable: boolean;
   totalTurns: number;
   turnCount: number;
   attempt: number;

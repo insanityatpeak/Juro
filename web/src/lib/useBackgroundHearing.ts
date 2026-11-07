@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { HearingStatus, HearingView, StoredTurn } from "./hearings/types";
+import type { LiveModels } from "./live";
 import { TURN_PLAN } from "./roles";
 import type { CaseEntry, Faction, Verdict } from "./types";
 
@@ -10,6 +11,25 @@ type Meta = Omit<HearingView, "turns">;
 
 const POLL_ACTIVE_MS = 1500; // hearing is moving
 const POLL_RESTING_MS = 5000; // paused / failed / partial: slow check in case another tab resumes it
+
+// The control token is returned once at creation and kept only in this browser.
+// Without it the hearing can still be viewed, but not paused, resumed, retried or ruled on.
+const CONTROL_HEADER = "x-hearing-control";
+const tokenKey = (id: string) => `juro:hearing-control:${id}`;
+function loadToken(id: string): string | null {
+  try {
+    return window.localStorage.getItem(tokenKey(id));
+  } catch {
+    return null;
+  }
+}
+function saveToken(id: string, token: string): void {
+  try {
+    window.localStorage.setItem(tokenKey(id), token);
+  } catch {
+    /* storage blocked: controls work for this page view only */
+  }
+}
 
 /**
  * The hearing runs on the server. This hook only watches it: it starts one, polls its state,
@@ -27,6 +47,7 @@ export function useBackgroundHearing(entry: CaseEntry, initialId: string | null 
   const [rulingError, setRulingError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [pollKey, setPollKey] = useState(0);
+  const [token, setToken] = useState<string | null>(null);
   const lastSeq = useRef(0);
 
   const apply = useCallback((v: HearingView) => {
@@ -59,6 +80,8 @@ export function useBackgroundHearing(entry: CaseEntry, initialId: string | null 
         const v = (await r.json()) as HearingView;
         if (stop) return;
         setOffline(false);
+        // Reopened from a link: pick up the control token if this browser started the hearing.
+        setToken((t) => t ?? loadToken(id));
         apply(v);
         if (v.status === "complete") return; // the record is final; only the ruling can still change
         delay = v.status === "waiting" || v.status === "running" ? POLL_ACTIVE_MS : POLL_RESTING_MS;
@@ -86,7 +109,9 @@ export function useBackgroundHearing(entry: CaseEntry, initialId: string | null 
         body: JSON.stringify({ caseId: entry.id }),
       });
       if (!r.ok) throw new Error(String(r.status));
-      const d = (await r.json()) as { id: string };
+      const d = (await r.json()) as { id: string; controlToken: string };
+      saveToken(d.id, d.controlToken);
+      setToken(d.controlToken);
       lastSeq.current = 0;
       setTurns([]);
       setMeta(null);
@@ -102,12 +127,12 @@ export function useBackgroundHearing(entry: CaseEntry, initialId: string | null 
 
   const act = useCallback(
     async (action: "pause" | "resume" | "retry") => {
-      if (!id) return;
+      if (!id || !token) return;
       setBusy(true);
       try {
         const r = await fetch(`/api/hearings/${id}`, {
           method: "PATCH",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", [CONTROL_HEADER]: token },
           body: JSON.stringify({ action }),
         });
         if (r.ok) apply((await r.json()) as HearingView);
@@ -118,17 +143,21 @@ export function useBackgroundHearing(entry: CaseEntry, initialId: string | null 
         setBusy(false);
       }
     },
-    [id, apply],
+    [id, token, apply],
   );
 
   const deliverVerdict = useCallback(
     async (decision: Verdict["decision"]) => {
       if (!id) return;
+      if (!token) {
+        setRulingError("Only the browser that started this hearing can rule on it.");
+        return;
+      }
       setRulingError(null);
       try {
         const r = await fetch(`/api/hearings/${id}/ruling`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", [CONTROL_HEADER]: token },
           body: JSON.stringify({ decision }),
         });
         if (r.ok) {
@@ -141,13 +170,14 @@ export function useBackgroundHearing(entry: CaseEntry, initialId: string | null 
         setRulingError("Could not reach the server. Try again.");
       }
     },
-    [id, apply],
+    [id, token, apply],
   );
 
   /** Leave this view. The hearing itself keeps its state on the server. */
   const restart = useCallback(() => {
     lastSeq.current = 0;
     setId(null);
+    setToken(null);
     setMeta(null);
     setTurns([]);
     setOffline(false);
@@ -167,8 +197,11 @@ export function useBackgroundHearing(entry: CaseEntry, initialId: string | null 
     return entry.transcript.turns[turns.length]?.agent ?? null;
   }, [status, meta, turns.length, entry]);
 
-  const base = meta?.verdict ?? entry.transcript.verdict;
-  const verdict: Verdict = meta?.humanDecision ? { ...base, decision: meta.humanDecision, by: "Human reviewer" } : base;
+  // The AI recommendation and the reviewer's ruling stay separate: the ruling is never merged into
+  // the recommendation's rationale or attributed to a named physician.
+  const verdict: Verdict = meta?.verdict ?? entry.transcript.verdict;
+  const controllable = meta?.controllable ?? true;
+  const canControl = token !== null && controllable;
 
   const totalTurns = meta?.totalTurns ?? entry.transcript.turns.length;
   return {
@@ -177,7 +210,10 @@ export function useBackgroundHearing(entry: CaseEntry, initialId: string | null 
     turns,
     thinkingAgent,
     verdict,
+    humanDecision: meta?.humanDecision ?? null,
     live: meta?.mode === "live",
+    /** Model names behind a live hearing, when known (shown on the bench). */
+    engines: null as LiveModels | null,
     auditRoot: meta?.auditRoot ?? null,
     activeId: turns.length ? turns[turns.length - 1].id : null,
     progress: phase === "idle" ? 0 : status === "complete" ? 1 : Math.min(turns.length / Math.max(totalTurns, 1), 0.96),
@@ -185,13 +221,19 @@ export function useBackgroundHearing(entry: CaseEntry, initialId: string | null 
     restart,
     deliverVerdict,
     // background-hearing state
+    backend: "server" as "server" | "browser",
     hearingId: id,
     status,
     mode: meta?.mode ?? null,
     pauseReason: meta?.pauseReason ?? null,
+    pauseRequested: meta?.pauseRequested ?? false,
     attempt: meta?.attempt ?? 0,
     error: meta?.error ?? null,
-    canRule: meta?.canRule ?? false,
+    /** False for legacy hearings (no control token on record): read-only for everyone. */
+    controllable,
+    /** This browser holds the control token: it may pause, resume, retry and rule. */
+    canControl,
+    canRule: (meta?.canRule ?? false) && canControl,
     totalTurns,
     turnCount: turns.length,
     loading: id !== null && meta === null && !notFound,

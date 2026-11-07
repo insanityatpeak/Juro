@@ -1,5 +1,5 @@
 // The four tribunal roles, mirrored from backend/src/juro/roles.py so the live
-// web hearing argues the same way the Band agents do. Models stay light (Haiku).
+// web hearing argues the same way the Band agents do.
 
 export type Role = "advocate" | "scrutinizer" | "evidence" | "adjudicator";
 
@@ -43,27 +43,9 @@ export const SYSTEM_PROMPTS: Record<Role, string> = {
     SHARED +
     "\nROLE: ADJUDICATOR. You moderate, then recommend. Open by framing the dispute, call on each " +
     "side, ask Evidence to resolve factual conflicts, and finally deliver a RULING that weighs both " +
-    "sides, cites the decisive evidence, and recommends OVERTURN or UPHOLD with a confidence 0 to 1. " +
+    "sides, cites the decisive evidence, and recommends OVERTURN or UPHOLD, naming any open question. " +
     "You never finalize. You hand the decision to the human reviewer.",
 };
 
-// A panel that spans models on purpose: the three debaters run on a fast, light
-// model so the back-and-forth stays quick; the chair (Adjudicator) runs on a
-// heavier model because weighing both sides and writing the ruling is the call
-// that carries the most reasoning. Same prompts, different engines — a real
-// cross-model tribunal, not four copies of one model.
-export const DEBATER_MODEL = "claude-haiku-4-5";
-export const CHAIR_MODEL = "claude-sonnet-4-6";
-
-export const MODEL_FOR: Record<Role, string> = {
-  advocate: DEBATER_MODEL,
-  scrutinizer: DEBATER_MODEL,
-  evidence: DEBATER_MODEL,
-  adjudicator: CHAIR_MODEL,
-};
-
-// The human reviewer's decision is the highest-stakes synthesis — also on the chair model.
-export const VERDICT_MODEL = CHAIR_MODEL;
-
-// Back-compat default (kept so older imports don't break).
-export const MODEL = DEBATER_MODEL;
+// Models: live hearings use Groq's free tier (see lib/live.ts): a lighter model for the three
+// debaters, a heavier one for the chair. No paid models are referenced here.

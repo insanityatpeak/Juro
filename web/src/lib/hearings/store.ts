@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { GENESIS_HASH, nextHash, shortRoot } from "../hash";
 import type { Faction, TurnType, Verdict } from "../types";
 import { getDb } from "./db";
@@ -37,17 +37,27 @@ type TurnRow = {
 
 const now = () => Date.now();
 
+/** A control token lets its holder pause, resume, retry and rule on one hearing. Only its hash is stored. */
+export const newControlToken = () => randomBytes(32).toString("base64url");
+export const hashControlToken = (token: string) => createHash("sha256").update(token).digest("hex");
+
 export function createStore(db: Database.Database) {
   const getRow = (id: string) => db.prepare("SELECT * FROM hearings WHERE id = ?").get(id) as HearingRow | undefined;
   const turnCount = (id: string) =>
     (db.prepare("SELECT COUNT(*) AS n FROM turns WHERE hearing_id = ?").get(id) as { n: number }).n;
 
-  /** Move a hearing between states only if it is currently in one of `from`. Returns whether it moved. */
+  /**
+   * Move a hearing between states only if it is currently in one of `from` and, when `workerId`
+   * is given, only if that worker still owns it. Returns whether it moved.
+   */
   function transition(
     id: string,
     from: HearingStatus[],
     to: HearingStatus,
-    extra: Partial<Pick<HearingRow, "pause_reason" | "attempt" | "error_code" | "error_message" | "next_action" | "worker_id">> = {},
+    extra: Partial<
+      Pick<HearingRow, "pause_reason" | "attempt" | "error_code" | "error_message" | "next_action" | "worker_id" | "pause_requested">
+    > = {},
+    workerId?: string,
   ): boolean {
     const sets = ["status = @to", "updated_at = @t"];
     const params: Record<string, unknown> = { id, to, t: now() };
@@ -57,23 +67,59 @@ export function createStore(db: Database.Database) {
     }
     const marks = from.map((_, i) => `@f${i}`).join(", ");
     from.forEach((f, i) => (params[`f${i}`] = f));
-    const r = db.prepare(`UPDATE hearings SET ${sets.join(", ")} WHERE id = @id AND status IN (${marks})`).run(params);
+    let where = `id = @id AND status IN (${marks})`;
+    if (workerId !== undefined) {
+      where += " AND worker_id = @owner";
+      params.owner = workerId;
+    }
+    const r = db.prepare(`UPDATE hearings SET ${sets.join(", ")} WHERE ${where}`).run(params);
     return r.changes === 1;
   }
 
   return {
-    create(input: { caseId: string; mode: HearingMode; totalTurns: number }): HearingRow {
+    create(input: { caseId: string; mode: HearingMode; totalTurns: number; controlTokenHash?: string | null }): HearingRow {
       const id = randomUUID();
       const t = now();
       db.prepare(
-        `INSERT INTO hearings (id, case_id, mode, status, total_turns, chain_hash, created_at, updated_at)
-         VALUES (?, ?, ?, 'waiting', ?, ?, ?, ?)`,
-      ).run(id, input.caseId, input.mode, input.totalTurns, GENESIS_HASH, t, t);
+        `INSERT INTO hearings (id, case_id, mode, status, total_turns, chain_hash, control_token_hash, created_at, updated_at)
+         VALUES (?, ?, ?, 'waiting', ?, ?, ?, ?, ?)`,
+      ).run(id, input.caseId, input.mode, input.totalTurns, GENESIS_HASH, input.controlTokenHash ?? null, t, t);
       return getRow(id)!;
+    },
+
+    /**
+     * Admit a hearing only if fewer than `maxOpen` are queued or running. The count and the insert
+     * run in one IMMEDIATE transaction (the write lock is taken first), so concurrent requests,
+     * including ones from other processes on the same file, cannot both pass the cap.
+     */
+    createIfRoom(
+      input: { caseId: string; mode: HearingMode; totalTurns: number; controlTokenHash?: string | null },
+      maxOpen: number,
+    ): HearingRow | null {
+      return db
+        .transaction(() => {
+          const open = (db.prepare("SELECT COUNT(*) AS n FROM hearings WHERE status IN ('waiting', 'running')").get() as { n: number }).n;
+          return open >= maxOpen ? null : this.create(input);
+        })
+        .immediate();
     },
 
     get: getRow,
     turnCount,
+
+    /** Hearings still queued or running; used to cap the queue. */
+    openCount(): number {
+      return (db.prepare("SELECT COUNT(*) AS n FROM hearings WHERE status IN ('waiting', 'running')").get() as { n: number }).n;
+    },
+
+    /** Whether `token` is this hearing's control token. Hearings without a token cannot be controlled. */
+    isController(id: string, token: string | null | undefined): boolean {
+      const h = getRow(id);
+      if (!h?.control_token_hash || !token) return false;
+      const a = Buffer.from(hashControlToken(token), "hex");
+      const b = Buffer.from(h.control_token_hash, "hex");
+      return a.length === b.length && timingSafeEqual(a, b);
+    },
 
     listTurns(id: string, after = 0): StoredTurn[] {
       const rows = db
@@ -136,37 +182,86 @@ export function createStore(db: Database.Database) {
       db.prepare("UPDATE hearings SET heartbeat_at = ? WHERE id = ? AND worker_id = ? AND status = 'running'").run(now(), id, workerId);
     },
 
-    /** Record a temporary failure while the worker keeps retrying. */
-    noteRetry(id: string, attempt: number, code: string, message: string): void {
-      db.prepare("UPDATE hearings SET attempt = ?, error_code = ?, error_message = ?, updated_at = ? WHERE id = ? AND status = 'running'").run(attempt, code, message, now(), id);
+    /** Record a temporary failure while the owning worker keeps retrying. */
+    noteRetry(id: string, workerId: string, attempt: number, code: string, message: string): boolean {
+      return (
+        db
+          .prepare(
+            "UPDATE hearings SET attempt = ?, error_code = ?, error_message = ?, updated_at = ? WHERE id = ? AND status = 'running' AND worker_id = ?",
+          )
+          .run(attempt, code, message, now(), id, workerId).changes === 1
+      );
     },
 
-    /** Reviewer pause. A running hearing stops before its next turn. */
-    pauseByReviewer(id: string): boolean {
-      return transition(id, ["waiting", "running"], "paused", {
-        pause_reason: "reviewer",
-        worker_id: null,
-        error_code: null,
-        error_message: null,
-        next_action: "Press Resume to continue from the next turn.",
-      });
+    /**
+     * Reviewer pause. A queued hearing pauses at once. A running one keeps its worker: the active
+     * step finishes and is saved, then the worker stops before starting another (see `settlePause`).
+     */
+    requestPause(id: string): "paused" | "pausing" | "invalid" {
+      return db.transaction(() => {
+        const ok = transition(id, ["waiting"], "paused", {
+          pause_reason: "reviewer",
+          worker_id: null,
+          pause_requested: 0,
+          error_code: null,
+          error_message: null,
+          next_action: "Press Resume to continue from the next turn.",
+        });
+        if (ok) return "paused" as const;
+        const r = db
+          .prepare("UPDATE hearings SET pause_requested = 1, updated_at = ? WHERE id = ? AND status = 'running'")
+          .run(now(), id);
+        return r.changes === 1 ? ("pausing" as const) : ("invalid" as const);
+      })();
     },
 
-    /** System pause (rate limit or retries used up). The worker releases the hearing. */
-    pauseBySystem(id: string, code: string, message: string, nextAction: string): boolean {
-      return transition(id, ["running"], "paused", {
-        pause_reason: "system",
-        worker_id: null,
-        error_code: code,
-        error_message: message,
-        next_action: nextAction,
-      });
+    /** Withdraw a pause request that has not taken effect yet. */
+    cancelPause(id: string): boolean {
+      return (
+        db
+          .prepare("UPDATE hearings SET pause_requested = 0, updated_at = ? WHERE id = ? AND status = 'running' AND pause_requested = 1")
+          .run(now(), id).changes === 1
+      );
+    },
+
+    /**
+     * The owning worker honours a pause request between steps. `failure` is set when the active
+     * step failed: the hearing pauses without retrying and the reviewer sees why.
+     */
+    settlePause(id: string, workerId: string, nextAction: string, failure?: { code: string; message: string }): boolean {
+      return transition(
+        id,
+        ["running"],
+        "paused",
+        {
+          pause_reason: "reviewer",
+          worker_id: null,
+          pause_requested: 0,
+          attempt: 0,
+          error_code: failure?.code ?? null,
+          error_message: failure?.message ?? null,
+          next_action: nextAction,
+        },
+        workerId,
+      );
+    },
+
+    /** System pause (rate limit or retries used up). The owning worker releases the hearing. */
+    pauseBySystem(id: string, workerId: string, code: string, message: string, nextAction: string): boolean {
+      return transition(
+        id,
+        ["running"],
+        "paused",
+        { pause_reason: "system", worker_id: null, pause_requested: 0, error_code: code, error_message: message, next_action: nextAction },
+        workerId,
+      );
     },
 
     /** Resume a paused hearing, or retry a failed/partial one from its next turn. */
     requeue(id: string): boolean {
       return transition(id, ["paused", "failed", "partial"], "waiting", {
         pause_reason: null,
+        pause_requested: 0,
         attempt: 0,
         error_code: null,
         error_message: null,
@@ -175,25 +270,29 @@ export function createStore(db: Database.Database) {
       });
     },
 
-    /** Permanent failure. Hearings that already have turns become `partial`, the rest `failed`. */
-    failPermanently(id: string, code: string, message: string, nextAction: string): HearingStatus | null {
+    /** Permanent failure, by the owning worker. Hearings with turns become `partial`, the rest `failed`. */
+    failPermanently(id: string, workerId: string, code: string, message: string, nextAction: string): HearingStatus | null {
       const to: HearingStatus = turnCount(id) > 0 ? "partial" : "failed";
-      const ok = transition(id, ["running"], to, {
-        worker_id: null,
-        error_code: code,
-        error_message: message,
-        next_action: nextAction,
-      });
+      const ok = transition(
+        id,
+        ["running"],
+        to,
+        { worker_id: null, pause_requested: 0, error_code: code, error_message: message, next_action: nextAction },
+        workerId,
+      );
       return ok ? to : null;
     },
 
-    /** All turns are stored and the recommendation is ready: the hearing becomes complete. */
+    /**
+     * All turns are stored and the recommendation is ready: the hearing becomes complete.
+     * A pending pause request is dropped, because no work remains to pause.
+     */
     complete(id: string, verdict: Verdict, workerId: string): boolean {
       return db.transaction(() => {
         const h = getRow(id);
         if (!h || h.status !== "running" || h.worker_id !== workerId || turnCount(id) !== h.total_turns) return false;
         db.prepare(
-          `UPDATE hearings SET status = 'complete', verdict_json = ?, audit_root = ?, worker_id = NULL,
+          `UPDATE hearings SET status = 'complete', verdict_json = ?, audit_root = ?, worker_id = NULL, pause_requested = 0,
              attempt = 0, error_code = NULL, error_message = NULL, next_action = NULL, updated_at = ? WHERE id = ?`,
         ).run(JSON.stringify(verdict), shortRoot(h.chain_hash), now(), id);
         return true;
@@ -212,12 +311,25 @@ export function createStore(db: Database.Database) {
       })();
     },
 
-    /** Hearings whose worker stopped heartbeating (server restart/crash) go back to the queue. */
+    /**
+     * Hearings whose worker stopped heartbeating (server restart/crash) go back to the queue,
+     * or to `paused` if the reviewer had asked for a pause.
+     */
     recoverStale(ttlMs: number): number {
       const t = now();
-      return db
-        .prepare("UPDATE hearings SET status = 'waiting', worker_id = NULL, updated_at = ? WHERE status = 'running' AND heartbeat_at < ?")
-        .run(t, t - ttlMs).changes;
+      return db.transaction(() => {
+        const paused = db
+          .prepare(
+            `UPDATE hearings SET status = 'paused', pause_reason = 'reviewer', pause_requested = 0, worker_id = NULL,
+               next_action = 'Press Resume to continue from the next turn.', updated_at = ?
+             WHERE status = 'running' AND pause_requested = 1 AND heartbeat_at < ?`,
+          )
+          .run(t, t - ttlMs).changes;
+        const queued = db
+          .prepare("UPDATE hearings SET status = 'waiting', worker_id = NULL, updated_at = ? WHERE status = 'running' AND heartbeat_at < ?")
+          .run(t, t - ttlMs).changes;
+        return paused + queued;
+      })();
     },
 
     waitingIds(): string[] {
@@ -239,6 +351,8 @@ export function createStore(db: Database.Database) {
         mode: h.mode,
         status: h.status,
         pauseReason: (h.pause_reason as PauseReason | null) ?? null,
+        pauseRequested: h.status === "running" && h.pause_requested === 1,
+        controllable: h.control_token_hash !== null,
         totalTurns: h.total_turns,
         turnCount: turnCount(id),
         attempt: h.attempt,

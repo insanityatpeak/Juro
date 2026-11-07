@@ -2,15 +2,8 @@
 
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
-import { CHAIR_MODEL, DEBATER_MODEL } from "@/lib/roles";
+import type { LiveModels } from "@/lib/live";
 import type { Faction, Turn } from "@/lib/types";
-
-/** "claude-sonnet-4-6" → "Sonnet 4.6" — for the panel caption. */
-function engineLabel(model: string): string {
-  const m = model.match(/claude-(\w+)-(\d+)-(\d+)/);
-  if (!m) return model;
-  return `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}.${m[3]}`;
-}
 
 /* Court-record palette for the dark "hearing room" ground. */
 export const SEAT_META: Record<
@@ -50,17 +43,8 @@ function Waveform({ color }: { color: string }) {
   );
 }
 
-/** Each seat names the engine behind it, so the cross-model panel is legible. */
-const SEAT_ENGINE: Record<Faction, string> = {
-  advocate: DEBATER_MODEL,
-  scrutinizer: DEBATER_MODEL,
-  evidence: DEBATER_MODEL,
-  adjudicator: CHAIR_MODEL,
-  human: CHAIR_MODEL,
-};
-
 /** The panel of seats. The agent who holds the floor lights up. */
-export function Bench({ active }: { active: Faction | null }) {
+export function Bench({ active, live = false, engines = null }: { active: Faction | null; live?: boolean; engines?: LiveModels | null }) {
   return (
     <div className="flex flex-col gap-2">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -84,10 +68,13 @@ export function Bench({ active }: { active: Faction | null }) {
           );
         })}
       </div>
-      {/* The panel spans two models on purpose — make that legible. */}
+      {/* Say what is actually producing the turns: a pre-written sample, or named live models. */}
       <p className="mono text-[10px] leading-relaxed text-cchalkdim">
-        cross-model panel · three debaters on {engineLabel(SEAT_ENGINE.advocate)} ·
-        chair on {engineLabel(SEAT_ENGINE.adjudicator)}
+        {!live
+          ? "sample record · these turns are pre-written; no AI model is running"
+          : engines
+            ? `live · Groq free tier · four roles on ${engines.debater}`
+            : "live · Groq free tier"}
       </p>
     </div>
   );
@@ -223,6 +210,8 @@ export function HearingTranscript({
   onCite,
   showBench = true,
   autoScroll = true,
+  live = false,
+  engines = null,
 }: {
   turns: Turn[];
   all: Turn[];
@@ -231,6 +220,9 @@ export function HearingTranscript({
   onCite?: (id: string) => void;
   showBench?: boolean;
   autoScroll?: boolean;
+  /** True only when real models produced these turns; otherwise the bench is labelled a sample. */
+  live?: boolean;
+  engines?: LiveModels | null;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -256,7 +248,7 @@ export function HearingTranscript({
 
   return (
     <div className="flex flex-col gap-5">
-      {showBench && <Bench active={activeAgent} />}
+      {showBench && <Bench active={activeAgent} live={live} engines={engines} />}
       <div className="flex flex-col gap-4">
         <AnimatePresence initial={false}>
           {turns.map((t) => (

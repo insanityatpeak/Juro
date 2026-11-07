@@ -27,7 +27,15 @@ export function RulingPanel({
         </p>
       )}
 
-      {ready && (
+      {ready && !pb.canControl && (
+        <p className="rounded-sm border border-cinkline bg-cink2 px-3 py-3 text-[12.5px] leading-relaxed text-cchalkdim">
+          {pb.controllable
+            ? "View only. The ruling can be delivered from the browser that started this hearing."
+            : "Read-only. This hearing was created before access control, so no ruling can be recorded. Start a new hearing to rule."}
+        </p>
+      )}
+
+      {ready && pb.canControl && (
         <div className="flex flex-col gap-3 rounded-sm border border-cinkline bg-cink2 p-3">
           <div className="grid grid-cols-3 gap-1.5">
             {(["OVERTURNED", "UPHELD", "REMANDED"] as const).map((c) => (
@@ -46,29 +54,40 @@ export function RulingPanel({
             ))}
           </div>
           <button onClick={() => pb.deliverVerdict(choice)} className="btn btn-brass !py-2.5 !text-[13px]">
-            Seal ruling and draft appeal
+            {pb.backend === "server" ? "Record ruling" : pb.live ? "Deliver ruling" : "Deliver sample ruling"}
           </button>
           {pb.rulingError && <p className="text-[12px] text-coxblood">{pb.rulingError}</p>}
         </div>
       )}
 
-      {ruled && (
+      {ruled && pb.humanDecision && (
         <div className="flex flex-col gap-4">
           <div className="rounded-sm border border-cinkline bg-cink2 p-4">
+            <div className="keb !text-[9px] text-cchalkdim">Your ruling</div>
             <div
-              className="display text-2xl"
-              style={{ color: v.decision === "UPHELD" ? "var(--c-oxblood)" : "var(--c-brass)" }}
+              className="display mt-1 text-2xl"
+              style={{ color: pb.humanDecision === "UPHELD" ? "var(--c-oxblood)" : "var(--c-brass)" }}
             >
-              {v.decision}
+              {pb.humanDecision}
             </div>
-            <p className="mt-2 text-[13px] leading-relaxed text-cchalkdim">{v.rationale}</p>
-            <div className="mono mt-3 text-[10px] text-cslate">
-              {v.by} · sealed to audit · {pb.auditRoot ?? transcript.auditRoot}
+            <div className="mono mt-2 text-[10px] leading-relaxed text-cslate">
+              {pb.backend === "browser"
+                ? `${pb.live ? "live hearing" : "sample"} · kept in this browser only · not recorded or sealed`
+                : `recorded from the browser that started this hearing · reviewer identity not verified${pb.auditRoot ? ` · transcript chain ${pb.auditRoot}` : ""}`}
             </div>
           </div>
 
+          {/* The AI recommendation stays a separate record from the reviewer's ruling. */}
+          <div className="rounded-sm border border-cinkline px-4 py-3">
+            <div className="keb !text-[9px] text-cchalkdim">
+              {pb.live ? "AI recommendation" : "Sample recommendation (pre-written)"} · {v.decision}
+            </div>
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-cchalkdim">{v.rationale}</p>
+          </div>
+
           <AnimatePresence>
-            {transcript.appealLetter && <AppealLetter text={transcript.appealLetter} />}
+            {/* The bundled letter argues for overturning; only show it when that matches the ruling. */}
+            {transcript.appealLetter && pb.humanDecision === "OVERTURNED" && <AppealLetter text={transcript.appealLetter} />}
           </AnimatePresence>
         </div>
       )}
@@ -85,7 +104,7 @@ function AppealLetter({ text }: { text: string }) {
       className="overflow-hidden rounded-sm border border-cinkline"
     >
       <div className="flex items-center justify-between border-b border-cinkline bg-cink2 px-3 py-2">
-        <span className="keb !text-[9px] text-cchalkdim">Drafted appeal</span>
+        <span className="keb !text-[9px] text-cchalkdim">Sample appeal letter (pre-written)</span>
         <span className="keb !text-[9px]" style={{ color: "var(--c-brass)" }}>
           ready
         </span>

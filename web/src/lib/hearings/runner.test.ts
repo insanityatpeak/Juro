@@ -6,7 +6,7 @@ import type { Faction, TurnType } from "../types";
 import { openDb } from "./db";
 import { runHearing, type RunnerDeps } from "./runner";
 import { SourceError, type TurnSource } from "./source";
-import { createStore } from "./store";
+import { createStore, hashControlToken, newControlToken } from "./store";
 
 const TOTAL = 4;
 const AGENTS: Faction[] = ["adjudicator", "advocate", "scrutinizer", "evidence"];
@@ -146,11 +146,11 @@ test("all turns but no recommendation is still partial, not complete", async () 
   assert.equal(store.recordRuling(id, "UPHELD"), "not_complete");
 });
 
-test("a reviewer pause stops the hearing before the next turn and resume finishes it", async () => {
-  // the source pauses the hearing the first time it is asked for turn 2 (a pause mid-flight)
+test("a reviewer pause lets the active step finish and saves it, then stops; resume finishes", async () => {
+  // the reviewer presses Pause while turn 2 is being generated
   const ctx: { pause?: () => void } = {};
   let paused = false;
-  const { source } = fakeSource({}, {
+  const { source, calls } = fakeSource({}, {
     onTurn: (seq) => {
       if (seq === 2 && !paused) {
         paused = true;
@@ -159,19 +159,167 @@ test("a reviewer pause stops the hearing before the next turn and resume finishe
     },
   });
   const { store, deps, id } = setup(source);
-  ctx.pause = () => store.pauseByReviewer(id);
+  ctx.pause = () => assert.equal(store.requestPause(id), "pausing");
   await runHearing(deps, id);
 
   let v = store.view(id)!;
   assert.equal(v.status, "paused");
   assert.equal(v.pauseReason, "reviewer");
-  assert.deepEqual(seqs(store, id), [1]); // the in-flight turn is dropped, not half-saved
+  assert.equal(v.pauseRequested, false);
+  assert.deepEqual(seqs(store, id), [1, 2]); // the paid-for in-flight turn is kept
+  assert.deepEqual(calls, ["turn:1", "turn:2"]); // nothing started after the pause
+  assert.match(v.error?.nextAction ?? "", /turn 3 of 4/);
 
   assert.equal(store.requeue(id), true);
   await runHearing(deps, id);
   v = store.view(id)!;
   assert.equal(v.status, "complete");
   assert.deepEqual(seqs(store, id), [1, 2, 3, 4]);
+  assert.equal(calls.filter((c) => c === "turn:2").length, 1); // resume did not redo the saved turn
+});
+
+test("a pause requested during a step that then fails pauses without retrying", async () => {
+  const ctx: { pause?: () => void } = {};
+  const { source, calls } = fakeSource({ "turn:2": [transient()] }, { onTurn: (seq) => seq === 2 && ctx.pause?.() });
+  const { store, deps, id } = setup(source);
+  ctx.pause = () => store.requestPause(id);
+  await runHearing(deps, id);
+
+  const v = store.view(id)!;
+  assert.equal(v.status, "paused");
+  assert.equal(v.pauseReason, "reviewer");
+  assert.equal(v.error?.code, "upstream_error"); // the reviewer sees why the step did not land
+  assert.deepEqual(seqs(store, id), [1]);
+  assert.equal(calls.filter((c) => c === "turn:2").length, 1); // no retry
+});
+
+test("a pause requested during the final recommendation still completes the hearing", async () => {
+  const ctx: { pause?: () => void } = {};
+  const { source } = fakeSource();
+  const verdict = source.generateVerdict.bind(source);
+  source.generateVerdict = async (entry, turns) => {
+    ctx.pause?.();
+    return verdict(entry, turns);
+  };
+  const { store, deps, id } = setup(source);
+  ctx.pause = () => assert.equal(store.requestPause(id), "pausing");
+  await runHearing(deps, id);
+
+  const v = store.view(id)!;
+  assert.equal(v.status, "complete"); // no work remains to pause
+  assert.equal(v.pauseRequested, false);
+  assert.equal(v.canRule, true);
+});
+
+test("pausing a queued hearing is immediate; a pending pause can be withdrawn", async () => {
+  const { store, id } = setup(fakeSource().source);
+  assert.equal(store.requestPause(id), "paused");
+  assert.equal(store.get(id)?.status, "paused");
+  assert.equal(store.requestPause(id), "invalid");
+
+  assert.equal(store.requeue(id), true);
+  assert.equal(store.claim(id, "w"), true);
+  assert.equal(store.requestPause(id), "pausing");
+  assert.equal(store.cancelPause(id), true);
+  assert.equal(store.view(id)?.pauseRequested, false);
+  assert.equal(store.cancelPause(id), false);
+});
+
+test("a stale worker cannot retry-note, pause, fail or settle a hearing a newer worker owns", () => {
+  const { store, id } = setup(fakeSource().source);
+  assert.equal(store.claim(id, "old"), true);
+  assert.equal(store.recoverStale(-1000), 1); // old worker's heartbeat counts as stale
+  assert.equal(store.claim(id, "new"), true);
+
+  assert.equal(store.noteRetry(id, "old", 1, "timeout", "late"), false);
+  assert.equal(store.pauseBySystem(id, "old", "timeout", "late", "x"), false);
+  assert.equal(store.failPermanently(id, "old", "auth_failed", "late", "x"), null);
+  store.requestPause(id);
+  assert.equal(store.settlePause(id, "old", "x"), false);
+
+  const row = store.get(id)!;
+  assert.equal(row.status, "running");
+  assert.equal(row.worker_id, "new");
+  assert.equal(row.error_code, null);
+});
+
+test("a worker that loses ownership while its request is pending saves nothing", async () => {
+  const ctx: { steal?: () => void } = {};
+  const { source } = fakeSource({}, { onTurn: (seq) => seq === 2 && ctx.steal?.() });
+  const { store, deps, id } = setup(source);
+  ctx.steal = () => {
+    store.recoverStale(-1000);
+    store.claim(id, "new");
+  };
+  await runHearing({ ...deps, workerId: "old" }, id);
+
+  assert.deepEqual(seqs(store, id), [1]); // old worker's turn 2 was refused
+  assert.equal(store.get(id)?.worker_id, "new");
+  assert.equal(store.get(id)?.status, "running");
+});
+
+test("a dead worker with a pending pause request recovers to paused, not back to the queue", () => {
+  const { store, id } = setup(fakeSource().source);
+  store.claim(id, "dead");
+  store.requestPause(id);
+  assert.equal(store.recoverStale(-1000), 1);
+  const v = store.view(id)!;
+  assert.equal(v.status, "paused");
+  assert.equal(v.pauseReason, "reviewer");
+});
+
+test("a used-up free quota pauses the hearing at once, without retrying", async () => {
+  const { source, calls } = fakeSource({ "turn:2": [new SourceError("pause", "quota_exhausted", "quota used up")] });
+  const { store, deps, id } = setup(source);
+  await runHearing(deps, id);
+  const v = store.view(id)!;
+  assert.equal(v.status, "paused");
+  assert.equal(v.pauseReason, "system");
+  assert.equal(v.error?.code, "quota_exhausted");
+  assert.match(v.error?.nextAction ?? "", /Resume/);
+  assert.equal(calls.filter((c) => c === "turn:2").length, 1); // no retries against an empty quota
+  assert.deepEqual(seqs(store, id), [1]);
+});
+
+test("a disabled provider fails the hearing permanently with a next action", async () => {
+  const { source } = fakeSource({ "turn:1": [new SourceError("permanent", "provider_disabled", "off")] });
+  const { store, deps, id } = setup(source);
+  await runHearing(deps, id);
+  const v = store.view(id)!;
+  assert.equal(v.status, "failed");
+  assert.equal(v.error?.code, "provider_disabled");
+  assert.match(v.error?.nextAction ?? "", /sample/);
+});
+
+test("only the holder of the control token controls a hearing", () => {
+  const store = createStore(openDb(":memory:"));
+  const token = newControlToken();
+  const h = store.create({ caseId: CASES[0].id, mode: "sample", totalTurns: TOTAL, controlTokenHash: hashControlToken(token) });
+  assert.equal(store.isController(h.id, token), true);
+  assert.equal(store.isController(h.id, newControlToken()), false);
+  assert.equal(store.isController(h.id, null), false);
+  const legacy = store.create({ caseId: CASES[0].id, mode: "sample", totalTurns: TOTAL });
+  assert.equal(store.isController(legacy.id, token), false); // no token on record: nobody controls it
+  assert.equal(store.view(legacy.id)?.controllable, false);
+  assert.equal(store.view(h.id)?.controllable, true);
+  assert.equal(store.openCount(), 2);
+});
+
+// Note: better-sqlite3 calls are synchronous, so this interleaves rather than truly races; the
+// cross-process guarantee comes from BEGIN IMMEDIATE taking the write lock before the count.
+test("the queue cap holds across two connections to the same database file", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "juro-admit-"));
+  const file = path.join(dir, "h.db");
+  const a = createStore(openDb(file));
+  const b = createStore(openDb(file));
+  const input = { caseId: CASES[0].id, mode: "sample" as const, totalTurns: TOTAL };
+  // Interleave admissions from two connections against a cap of 3.
+  const results = [a, b, a, b, a, b].map((s) => s.createIfRoom(input, 3));
+  assert.equal(results.filter(Boolean).length, 3);
+  assert.equal(a.openCount(), 3);
 });
 
 test("two workers on one hearing cannot duplicate or reorder turns", async () => {
