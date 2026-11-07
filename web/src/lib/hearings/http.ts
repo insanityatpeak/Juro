@@ -19,5 +19,13 @@ export const jsonError = (status: number, error: string, message?: string) =>
 
 export const notFound = () => jsonError(404, "not_found");
 export const invalidBody = () => jsonError(400, "invalid_body", "Send a JSON object.");
+export const durableDisabled = () =>
+  jsonError(
+    404,
+    "durable_hearings_disabled",
+    "Server-side hearings are off on this deployment. The Chamber plays sample hearings in the browser.",
+  );
+export const readOnlyLegacy = () =>
+  jsonError(409, "read_only", "This hearing was created before access control and is read-only. Start a new hearing.");
 export const forbidden = () =>
   jsonError(403, "forbidden", "Only the browser that started this hearing can control it. Viewing is still allowed.");

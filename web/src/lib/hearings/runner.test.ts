@@ -287,7 +287,26 @@ test("only the holder of the control token controls a hearing", () => {
   assert.equal(store.isController(h.id, null), false);
   const legacy = store.create({ caseId: CASES[0].id, mode: "sample", totalTurns: TOTAL });
   assert.equal(store.isController(legacy.id, token), false); // no token on record: nobody controls it
+  assert.equal(store.view(legacy.id)?.controllable, false);
+  assert.equal(store.view(h.id)?.controllable, true);
   assert.equal(store.openCount(), 2);
+});
+
+// Note: better-sqlite3 calls are synchronous, so this interleaves rather than truly races; the
+// cross-process guarantee comes from BEGIN IMMEDIATE taking the write lock before the count.
+test("the queue cap holds across two connections to the same database file", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "juro-admit-"));
+  const file = path.join(dir, "h.db");
+  const a = createStore(openDb(file));
+  const b = createStore(openDb(file));
+  const input = { caseId: CASES[0].id, mode: "sample" as const, totalTurns: TOTAL };
+  // Interleave admissions from two connections against a cap of 3.
+  const results = [a, b, a, b, a, b].map((s) => s.createIfRoom(input, 3));
+  assert.equal(results.filter(Boolean).length, 3);
+  assert.equal(a.openCount(), 3);
 });
 
 test("two workers on one hearing cannot duplicate or reorder turns", async () => {

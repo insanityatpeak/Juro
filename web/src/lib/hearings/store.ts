@@ -87,6 +87,23 @@ export function createStore(db: Database.Database) {
       return getRow(id)!;
     },
 
+    /**
+     * Admit a hearing only if fewer than `maxOpen` are queued or running. The count and the insert
+     * run in one IMMEDIATE transaction (the write lock is taken first), so concurrent requests,
+     * including ones from other processes on the same file, cannot both pass the cap.
+     */
+    createIfRoom(
+      input: { caseId: string; mode: HearingMode; totalTurns: number; controlTokenHash?: string | null },
+      maxOpen: number,
+    ): HearingRow | null {
+      return db
+        .transaction(() => {
+          const open = (db.prepare("SELECT COUNT(*) AS n FROM hearings WHERE status IN ('waiting', 'running')").get() as { n: number }).n;
+          return open >= maxOpen ? null : this.create(input);
+        })
+        .immediate();
+    },
+
     get: getRow,
     turnCount,
 
@@ -335,6 +352,7 @@ export function createStore(db: Database.Database) {
         status: h.status,
         pauseReason: (h.pause_reason as PauseReason | null) ?? null,
         pauseRequested: h.status === "running" && h.pause_requested === 1,
+        controllable: h.control_token_hash !== null,
         totalTurns: h.total_turns,
         turnCount: turnCount(id),
         attempt: h.attempt,

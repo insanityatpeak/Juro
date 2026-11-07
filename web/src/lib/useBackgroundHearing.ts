@@ -196,8 +196,11 @@ export function useBackgroundHearing(entry: CaseEntry, initialId: string | null 
     return entry.transcript.turns[turns.length]?.agent ?? null;
   }, [status, meta, turns.length, entry]);
 
-  const base = meta?.verdict ?? entry.transcript.verdict;
-  const verdict: Verdict = meta?.humanDecision ? { ...base, decision: meta.humanDecision, by: "Human reviewer" } : base;
+  // The AI recommendation and the reviewer's ruling stay separate: the ruling is never merged into
+  // the recommendation's rationale or attributed to a named physician.
+  const verdict: Verdict = meta?.verdict ?? entry.transcript.verdict;
+  const controllable = meta?.controllable ?? true;
+  const canControl = token !== null && controllable;
 
   const totalTurns = meta?.totalTurns ?? entry.transcript.turns.length;
   return {
@@ -206,6 +209,7 @@ export function useBackgroundHearing(entry: CaseEntry, initialId: string | null 
     turns,
     thinkingAgent,
     verdict,
+    humanDecision: meta?.humanDecision ?? null,
     live: meta?.mode === "live",
     auditRoot: meta?.auditRoot ?? null,
     activeId: turns.length ? turns[turns.length - 1].id : null,
@@ -214,6 +218,7 @@ export function useBackgroundHearing(entry: CaseEntry, initialId: string | null 
     restart,
     deliverVerdict,
     // background-hearing state
+    backend: "server" as "server" | "browser",
     hearingId: id,
     status,
     mode: meta?.mode ?? null,
@@ -221,9 +226,11 @@ export function useBackgroundHearing(entry: CaseEntry, initialId: string | null 
     pauseRequested: meta?.pauseRequested ?? false,
     attempt: meta?.attempt ?? 0,
     error: meta?.error ?? null,
+    /** False for legacy hearings (no control token on record): read-only for everyone. */
+    controllable,
     /** This browser holds the control token: it may pause, resume, retry and rule. */
-    canControl: token !== null,
-    canRule: (meta?.canRule ?? false) && token !== null,
+    canControl,
+    canRule: (meta?.canRule ?? false) && canControl,
     totalTurns,
     turnCount: turns.length,
     loading: id !== null && meta === null && !notFound,

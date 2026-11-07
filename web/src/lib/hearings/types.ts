@@ -55,6 +55,8 @@ export interface HearingView {
   pauseReason: PauseReason | null;
   /** A reviewer asked to pause; the active step is finishing and will be saved first. */
   pauseRequested: boolean;
+  /** False for hearings created before control tokens existed: nobody can control them; view only. */
+  controllable: boolean;
   totalTurns: number;
   turnCount: number;
   attempt: number;

@@ -4,11 +4,13 @@ import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { HearingTranscript } from "@/components/HearingTranscript";
 import { useBackgroundHearing, type HearingState } from "@/lib/useBackgroundHearing";
+import { useSampleHearing } from "@/lib/useSampleHearing";
 import { useVoice } from "@/lib/useVoice";
 import type { CaseEntry, Transcript } from "@/lib/types";
 import { RightRail } from "./RightRail";
 import { StatusBanner } from "./StatusBanner";
 
+/** Durable hearing: runs on the server (SQLite) and keeps going without this page. Local use only. */
 export function Hearing({
   entry,
   onBack,
@@ -19,15 +21,23 @@ export function Hearing({
   /** Set when reopening an existing hearing from its link. */
   hearingId?: string | null;
 }) {
+  const pb = useBackgroundHearing(entry, hearingId);
+  return <HearingRoom entry={entry} onBack={onBack} pb={pb} />;
+}
+
+/** Sample hearing played entirely in this browser: no server, no database, nothing recorded. */
+export function SampleHearing({ entry, onBack }: { entry: CaseEntry; onBack: () => void }) {
+  const pb = useSampleHearing(entry);
+  return <HearingRoom entry={entry} onBack={onBack} pb={pb} />;
+}
+
+function HearingRoom({ entry, onBack, pb }: { entry: CaseEntry; onBack: () => void; pb: HearingState }) {
   const transcript: Transcript = entry.transcript;
   const cf = transcript.case;
 
   const voice = useVoice();
   const [listen, setListen] = useState(false);
   const [focus, setFocus] = useState<string | null>(null);
-
-  // The hearing runs on the server and keeps going without this page.
-  const pb = useBackgroundHearing(entry, hearingId);
 
   // Listen: read newly arrived turns aloud, one after another.
   const spoken = useRef<Set<string>>(new Set());
@@ -66,7 +76,7 @@ export function Hearing({
     speaking.current = false;
     pb.restart();
     setFocus(null);
-    window.history.replaceState(null, "", "/chamber");
+    if (pb.backend === "server") window.history.replaceState(null, "", "/chamber");
     onBack();
   };
 
@@ -100,7 +110,7 @@ export function Hearing({
         </button>
       </header>
 
-      <StatusBanner pb={pb} />
+      <StatusBanner pb={pb} onNewHearing={back} />
 
       <div className="grid min-h-0 gap-0 lg:grid-cols-[minmax(0,1fr)_360px]">
         {/* main column */}
@@ -110,7 +120,7 @@ export function Hearing({
           ) : pb.loading ? (
             <Message title="Loading the hearing…" body="" />
           ) : pb.phase === "idle" ? (
-            <Intro onStart={pb.start} starting={pb.starting} error={pb.startError} />
+            <Intro onStart={pb.start} starting={pb.starting} error={pb.startError} backend={pb.backend} />
           ) : (
             <>
               <div className="scroll-fade min-h-0 flex-1 overflow-y-auto px-6 py-6">
@@ -121,6 +131,7 @@ export function Hearing({
                   thinkingAgent={pb.thinkingAgent}
                   onCite={(id) => setFocus(id)}
                   showBench
+                  live={pb.live}
                 />
               </div>
               <Transport pb={pb} />
@@ -157,13 +168,24 @@ function Message({ title, body, action }: { title: string; body: string; action?
   );
 }
 
-function Intro({ onStart, starting, error }: { onStart: () => void; starting: boolean; error: string | null }) {
+function Intro({
+  onStart,
+  starting,
+  error,
+  backend,
+}: {
+  onStart: () => void;
+  starting: boolean;
+  error: string | null;
+  backend: "server" | "browser";
+}) {
   return (
     <div className="mx-auto flex max-w-md flex-1 flex-col items-center justify-center px-6 py-20 text-center">
       <div className="display text-3xl text-cchalk">A claim was denied.</div>
       <p className="mt-3 text-[15px] leading-relaxed text-cchalkdim">
-        Convene the tribunal and hear both sides argue from the record. The hearing runs on the server, so you can leave
-        and come back to it. You deliver the ruling.
+        {backend === "server"
+          ? "Convene the tribunal and hear both sides argue from the record. This sample hearing runs on the server, so you can leave and come back to it. You deliver the ruling."
+          : "Replay a sample hearing: both sides argue from the record in pre-written turns, played in your browser. Nothing is sent or saved. You deliver the ruling."}
       </p>
       <button onClick={onStart} disabled={starting} className="btn btn-brass mt-7 disabled:opacity-50">
         {starting ? "Convening…" : "Convene the tribunal"}
