@@ -32,12 +32,20 @@ export function StatusBanner({ pb }: { pb: HearingState }) {
       showLink = true;
       break;
     case "running":
-      title = `In session · ${where}`;
-      detail =
-        pb.attempt > 0
-          ? `Temporary problem${pb.error?.message ? `: ${pb.error.message}` : ""}. Retrying (attempt ${pb.attempt + 1}).`
-          : "Running on the server. You can close this page and come back with the link.";
-      action = { label: "Pause", onClick: pb.pause };
+      if (pb.pauseRequested) {
+        title = `Pausing… · ${where}`;
+        detail =
+          "The current step will finish and be saved, then the hearing pauses before the next one." +
+          (pb.live ? " The current request may finish and incur a charge." : "");
+        action = { label: "Keep going", onClick: pb.resume };
+      } else {
+        title = `In session · ${where}`;
+        detail =
+          pb.attempt > 0
+            ? `Temporary problem${pb.error?.message ? `: ${pb.error.message}` : ""}. Retrying (attempt ${pb.attempt + 1}).`
+            : "Running on the server. You can close this page and come back with the link.";
+        action = { label: "Pause", onClick: pb.pause };
+      }
       showLink = true;
       break;
     case "paused":
@@ -62,6 +70,11 @@ export function StatusBanner({ pb }: { pb: HearingState }) {
       break;
     case "complete":
       return pb.offline ? <Offline /> : null;
+  }
+
+  if (!pb.canControl && action) {
+    action = null;
+    detail = `${detail} View only: the controls are in the browser that started this hearing.`;
   }
 
   return (

@@ -27,7 +27,13 @@ export function RulingPanel({
         </p>
       )}
 
-      {ready && (
+      {ready && !pb.canControl && (
+        <p className="rounded-sm border border-cinkline bg-cink2 px-3 py-3 text-[12.5px] leading-relaxed text-cchalkdim">
+          View only. The ruling can be delivered from the browser that started this hearing.
+        </p>
+      )}
+
+      {ready && pb.canControl && (
         <div className="flex flex-col gap-3 rounded-sm border border-cinkline bg-cink2 p-3">
           <div className="grid grid-cols-3 gap-1.5">
             {(["OVERTURNED", "UPHELD", "REMANDED"] as const).map((c) => (

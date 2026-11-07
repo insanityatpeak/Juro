@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS hearings (
   human_decided_at INTEGER,
   worker_id TEXT,
   heartbeat_at INTEGER,
+  pause_requested INTEGER NOT NULL DEFAULT 0,
+  control_token_hash TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -51,7 +53,21 @@ export function openDb(file: string): Database.Database {
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   db.exec(SCHEMA);
+  migrate(db);
   return db;
+}
+
+/** Columns added after the first release. CREATE TABLE IF NOT EXISTS does not add them to old files. */
+const ADDED_COLUMNS: [string, string][] = [
+  ["pause_requested", "INTEGER NOT NULL DEFAULT 0"],
+  ["control_token_hash", "TEXT"],
+];
+
+function migrate(db: Database.Database): void {
+  const have = new Set((db.prepare("PRAGMA table_info(hearings)").all() as { name: string }[]).map((c) => c.name));
+  for (const [name, def] of ADDED_COLUMNS) {
+    if (!have.has(name)) db.exec(`ALTER TABLE hearings ADD COLUMN ${name} ${def}`);
+  }
 }
 
 // One connection per server process, kept across dev hot reloads.

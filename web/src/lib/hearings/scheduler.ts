@@ -18,15 +18,20 @@ function deps(): RunnerDeps {
 export function tick(): void {
   const s = g.__juroScheduler;
   if (!s) return;
-  const store = getStore();
-  store.recoverStale(STALE_MS);
-  for (const id of store.waitingIds()) {
-    if (s.active.size >= MAX_CONCURRENT) break;
-    if (s.active.has(id)) continue;
-    s.active.add(id);
-    void runHearing(deps(), id)
-      .catch((e) => console.error("[hearings] runner crashed", id, e))
-      .finally(() => s.active.delete(id));
+  // tick runs inside setInterval: an exception here would be uncaught and could stop the server.
+  try {
+    const store = getStore();
+    store.recoverStale(STALE_MS);
+    for (const id of store.waitingIds()) {
+      if (s.active.size >= MAX_CONCURRENT) break; // per process
+      if (s.active.has(id)) continue;
+      s.active.add(id);
+      void runHearing(deps(), id)
+        .catch((e) => console.error("[hearings] runner crashed", id, e))
+        .finally(() => s.active.delete(id));
+    }
+  } catch (e) {
+    console.error("[hearings] scheduler tick failed", e);
   }
 }
 
