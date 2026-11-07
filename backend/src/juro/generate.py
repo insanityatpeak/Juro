@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 import anthropic
 
 from juro.cases import CASES, DEFAULT_CASE_ID
+from juro.providers import provider_allowed, require_provider
 from juro.roles import SYSTEM_PROMPTS, TURN_PLAN, model_for
 from juro.transcript import (
     EvidenceItem,
@@ -94,6 +95,7 @@ def _ask(
         '"addressedTo": "<advocate|scrutinizer|evidence|adjudicator|human|null>", '
         '"evidenceRefs": ["EX-..", ...]}'
     )
+    require_provider("anthropic")  # checked before every call
     msg = client.messages.create(
         model=model_for(role),
         max_tokens=400,
@@ -125,6 +127,7 @@ def _final_verdict(client: anthropic.Anthropic, turns: list[Turn], case: dict, e
         'Respond ONLY with JSON: {"decision": "OVERTURNED|UPHELD", '
         '"rationale": "<one or two sentences>", "confidence": <0..1>}'
     )
+    require_provider("anthropic")  # checked before every call
     msg = client.messages.create(
         model=model_for("adjudicator"),
         max_tokens=300,
@@ -152,6 +155,11 @@ def main() -> None:
     case_id, case, evidence = _select_case(requested)
     print(f"Generating debate for case: {case_id}  ({case['claimId']} — {case['patient']})")
 
+    if not provider_allowed("anthropic"):
+        raise SystemExit(
+            "python -m juro.generate is disabled: it calls the paid Anthropic API and Juro uses no paid "
+            "services. The web app's bundled sample cases need no generation."
+        )
     _env = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".env")
     if os.path.exists(_env):
         load_dotenv(_env)

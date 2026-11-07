@@ -34,7 +34,7 @@ When a claim is denied, four specialized agents take it to a tribunal in one sha
 
 They read and rebut each other instead of passing tasks down a line. A person reads the whole debate and delivers the decision. The AI argues. A human rules.
 
-> **No paid services.** The web app makes no paid API calls: AI generation and server text-to-speech are switched off in code (`web/src/lib/providers.ts`), even if API keys are present. The Chamber replays **pre-written sample hearings**, clearly labelled as samples, and reads them aloud with the browser's built-in speech. The Python/Band path below still calls the Anthropic API (paid) and is not part of the free configuration.
+> **No paid services.** The web app makes no paid API calls: AI generation and server text-to-speech are switched off in code (`web/src/lib/providers.ts`), even if API keys are present. The Chamber replays **pre-written sample hearings**, clearly labelled as samples, and reads them aloud with the browser's built-in speech. The Python/Band path is held to the same rule: its Anthropic calls are blocked in code (`backend/src/juro/providers.py`), so `python -m juro.generate` and the Band agent processes refuse to run until a free model provider is wired in.
 
 ## Architecture
 
@@ -89,7 +89,7 @@ Getting four independent models to run a clean debate was the hard part. On the 
 | Front end | Next.js 16 (App Router), React 19, Tailwind v4, Motion, Lenis |
 | Durable hearings (local, opt-in) | SQLite via `better-sqlite3`, in-process worker |
 | Voice | Browser speech synthesis (Web Speech API) |
-| Agents (Band path, paid) | Python, `band-sdk` (Band), LangGraph, Anthropic Claude (Haiku 4.5 + Sonnet 4.6) |
+| Agents (Band path; model calls disabled) | Python, `band-sdk` (Band), LangGraph; Anthropic Claude calls are blocked (no paid services) |
 | Deploy | Static/serverless host for sample playback (e.g. Vercel); durable hearings need a long-running Node server |
 
 ## Repository

@@ -100,6 +100,11 @@ class VerdictAgent(ABC):
         return agent
 
     def _create_llm(self):
+        # Juro uses no paid services: the Band agents' model (Anthropic) is disabled, so an agent
+        # process refuses to start rather than making paid calls. Checked before the client exists.
+        from juro.providers import require_provider
+
+        require_provider("anthropic")
         from langchain_anthropic import ChatAnthropic
         from juro.roles import model_for
 
