@@ -5,7 +5,7 @@
 
 ### Both sides heard. One ruling.
 
-An adversarial AI tribunal for denied health-insurance claims. Four agents argue a denial in one shared room on **Band**, a human delivers the binding ruling, and every line is hash-chained so the record can't be quietly changed.
+An adversarial AI tribunal for denied health-insurance claims. Four agents argue a denial in one shared room on **Band**, a human delivers the ruling, and the turns of a recorded hearing are hash-chained so edits to them are detectable.
 
 [**Live demo →**](https://juro-roan.vercel.app) · [**The Chamber →**](https://juro-roan.vercel.app/chamber) · [**Yt Explained →**](https://www.youtube.com/watch?v=N3ys8yAu0Vw)
 
@@ -32,34 +32,31 @@ When a claim is denied, four specialized agents take it to a tribunal in one sha
 | **Evidence** | Stays neutral and produces the exact document or statute that settles a disputed fact. |
 | **Adjudicator** | Chairs the hearing and recommends a ruling, then hands the decision to a human. |
 
-They read and rebut each other instead of passing tasks down a line. A person reads the whole debate and delivers the binding decision, and Juro drafts the appeal letter with the citations already in it. The AI argues. A human rules.
+They read and rebut each other instead of passing tasks down a line. A person reads the whole debate and delivers the decision. The AI argues. A human rules.
+
+> **No paid services.** The web app makes no paid API calls: AI generation and server text-to-speech are switched off in code (`web/src/lib/providers.ts`), even if API keys are present. The Chamber replays **pre-written sample hearings**, clearly labelled as samples, and reads them aloud with the browser's built-in speech. The Python/Band path below still calls the Anthropic API (paid) and is not part of the free configuration.
 
 ## Architecture
 
-Two paths produce the same thing, a **transcript**, and the front end plays it. The Chamber streams a live debate; the Band runtime runs the same four roles as separate agents in one shared room.
+Two paths produce the same thing, a **transcript**, and the front end plays it. The Chamber plays a sample hearing; the Band runtime runs the four roles as separate agents in one shared room.
 
-### The live Chamber (what the demo shows)
+### The Chamber (what the demo shows)
 
 ```mermaid
 flowchart TB
     subgraph Browser["Reviewer's browser"]
       C["Chamber  ·  /chamber"]
+      P["Sample playback\n(bundled, pre-written turns)"]
+      V["Browser speech synthesis"]
     end
-    subgraph Vercel["Next.js 16 on Vercel"]
-      H["/api/hearing\nstreams the debate as NDJSON"]
-      S["/api/speak\nDeepgram TTS proxy"]
-    end
-    subgraph Anthropic
-      HK["Haiku 4.5\nAdvocate · Scrutinizer · Evidence"]
-      SN["Sonnet 4.6\nAdjudicator + ruling"]
-    end
-    C -- "POST { caseId }" --> H
-    H -- "debaters" --> HK
-    H -- "chair + ruling" --> SN
-    H -- "turn-by-turn" --> C
-    C -- "per-turn text" --> S --> DG["Deepgram Aura-2\na distinct voice per agent"]
-    C -- "human delivers verdict" --> C
+    C --> P --> C
+    C -- "Listen" --> V
+    C -- "reviewer delivers ruling\n(kept in this browser)" --> C
 ```
+
+By default nothing leaves the browser: there is no hearing API call, no database and no AI model. That is what a static or serverless host (such as Vercel) serves.
+
+**Durable hearings (local, opt-in).** With `NEXT_PUBLIC_DURABLE_HEARINGS=1` on a long-running Node server, hearings run server-side, are stored in SQLite, survive closing the tab and server restarts, and can be paused/resumed. They still replay the sample record (no paid generation). See [`web/README.md`](web/README.md).
 
 ### The Band tribunal (the multi-agent runtime)
 
@@ -78,20 +75,22 @@ Each agent is its own process that connects to Band over a WebSocket and joins o
 
 ## What makes it hold up
 
-Getting four independent models to run a clean debate was the hard part. Three things make it reliable and trustworthy:
+Getting four independent models to run a clean debate was the hard part. On the Band path:
 
-- **A cross-model panel.** The three debaters run on a fast model (`claude-haiku-4-5`); the chair runs on a heavier one (`claude-sonnet-4-6`), because weighing both sides and writing the ruling carries the most reasoning.
-- **A deterministic relay.** A mention-driven debate stalls when a model hands off to the wrong agent, and goes silent when a model returns its ruling as plain text without posting. Juro's custom LangGraph adapter forces every handoff in code (the chain can't stall) and posts the model's final text itself if the send tool was skipped (no turn is ever lost).
-- **A tamper-evident record.** Every turn is hash-chained into a single root. Change one word, anywhere, and the root no longer matches.
+- **A cross-model panel (Band path).** The three debaters run on a fast model (`claude-haiku-4-5`); the chair runs on a heavier one (`claude-sonnet-4-6`). The web Chamber does not call these models; it replays samples.
+- **A deterministic relay.** A mention-driven debate stalls when a model hands off to the wrong agent, and goes silent when a model returns its ruling as plain text without posting. Juro's custom LangGraph adapter forces every handoff in code and posts the model's final text itself if the send tool was skipped.
+- **A hash-chained transcript (durable hearings and Band exports).** Each stored turn's hash covers the previous hash, so editing a stored turn breaks the chain. Limits today: the chain covers turns only (not the recommendation or ruling), there is no published checkpoint, and anyone who can rewrite the database can recompute it. Browser sample playback is not hashed or sealed.
+- **Rulings are not identity-verified.** A durable hearing's controls (pause, resume, ruling) need a token held by the browser that started it. The token authorizes the action; it does not establish who the reviewer is.
 
 ## Tech stack
 
 | Layer | What |
 |---|---|
-| Front end | Next.js 16 (App Router), React 19, Tailwind v4, Framer Motion, Lenis |
-| Agents | Python, `band-sdk` (Band), LangGraph, Anthropic Claude (Haiku 4.5 + Sonnet 4.6) |
-| Voice | Deepgram Aura-2 (a distinct voice per agent) |
-| Deploy | Vercel |
+| Front end | Next.js 16 (App Router), React 19, Tailwind v4, Motion, Lenis |
+| Durable hearings (local, opt-in) | SQLite via `better-sqlite3`, in-process worker |
+| Voice | Browser speech synthesis (Web Speech API) |
+| Agents (Band path, paid) | Python, `band-sdk` (Band), LangGraph, Anthropic Claude (Haiku 4.5 + Sonnet 4.6) |
+| Deploy | Static/serverless host for sample playback (e.g. Vercel); durable hearings need a long-running Node server |
 
 ## Repository
 
@@ -99,11 +98,13 @@ Getting four independent models to run a clean debate was the hard part. Three t
 web/                      Next.js app — the landing and the Chamber
   src/app/
     page.tsx              the landing ("Court Record")
-    chamber/page.tsx      the reviewer console (live hearing)
-    api/hearing/route.ts  streams the live cross-model debate
-    api/speak/route.ts    Deepgram TTS proxy (per-agent voices)
+    chamber/page.tsx      the reviewer console (sample playback by default)
+    chamber/[id]/page.tsx reopen a durable hearing by link (opt-in)
+    api/hearings/...      durable hearing API (opt-in; off by default)
+    api/speak/route.ts    server TTS (disabled: no paid services)
   src/components/         Chamber, HearingTranscript, landing, motion
-  src/lib/                Transcript schema, the live-hearing player, roles, voice
+  src/lib/                transcript schema, sample playback, durable-hearing hooks, roles, voice, provider controls
+  src/lib/hearings/       durable hearing store (SQLite), runner, scheduler, tests
   src/data/               the bundled sample cases
 
 backend/                  Python
@@ -126,21 +127,9 @@ npm install
 npm run dev          # http://localhost:3000
 ```
 
-The app ships with a bundled sample hearing, so a fresh clone runs at `localhost:3000` with **no keys at all** — the landing page and the Chamber both work off the sample transcript, just without live AI turns or spoken voices.
+No keys are needed or used. The landing page and the Chamber run from the bundled sample cases; **Listen** uses the browser's own voices. Setting `ANTHROPIC_API_KEY` or `DEEPGRAM_API_KEY` does not enable anything: paid providers are off in code.
 
-To make hearings and voices live, create `web/.env.local` (gitignored) with:
-
-```
-ANTHROPIC_API_KEY=sk-ant-...     # the agents' reasoning
-DEEPGRAM_API_KEY=...             # the agent voices
-```
-
-| Key | Where to get it | Needed for |
-|---|---|---|
-| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/) → Settings → API Keys → Create Key (needs billing set up; pay-as-you-go, hearings are cheap on Haiku) | Live cross-model hearings (`/api/hearing`) |
-| `DEEPGRAM_API_KEY` | [console.deepgram.com](https://console.deepgram.com/) → sign up (free tier includes trial credit) → API Keys → Create a New API Key | Spoken agent voices (`/api/speak`) |
-
-Restart `npm run dev` after adding/changing `.env.local` — Next.js only reads it on startup.
+To try durable server-side hearings locally, add `NEXT_PUBLIC_DURABLE_HEARINGS=1` to `web/.env.local` and restart (details in [`web/README.md`](web/README.md)).
 
 ### The Band tribunal
 

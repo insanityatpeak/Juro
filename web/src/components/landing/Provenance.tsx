@@ -91,13 +91,13 @@ export function Provenance() {
               >
                 <span className="keb !text-[10px] text-cbrass">root</span>
                 <span className="mono text-[12px] text-cink">4c7e91a2 8f0b6d35</span>
-                <span className="mono ml-auto text-[10px] text-cbrass">sealed</span>
+                <span className="mono ml-auto text-[10px] text-cbrass">illustration</span>
               </motion.div>
             </div>
             <p className="mt-6 text-[12px] leading-relaxed text-cslate">
-              Change one word, anywhere in the hearing, and the root no longer matches. Every argument
-              stays pinned to the exact record it cites. The whole thing is verifiable, and
-              tamper-evident by construction.
+              Change one word in a stored turn and the root no longer matches. Today the chain covers the
+              turns of a recorded hearing (not the recommendation or the ruling), and there is no
+              published checkpoint yet, so it detects casual edits rather than proving the record.
             </p>
           </div>
         </div>

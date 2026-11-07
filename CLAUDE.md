@@ -4,11 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Juro is an adversarial AI tribunal for denied health-insurance claims. Four agents (Advocate, Scrutinizer, Evidence, Adjudicator) argue a denial in one shared room, a human delivers the binding ruling, and every turn is hash-chained so the record is tamper-evident. Built for the Band of Agents Hackathon (Track 3 — Regulated & High-Stakes Workflows).
+Juro is an adversarial AI tribunal for denied health-insurance claims. Four agents (Advocate, Scrutinizer, Evidence, Adjudicator) argue a denial in one shared room, a human delivers the ruling, and stored turns are hash-chained so edits to them are detectable (turns only; no trusted checkpoint yet). Built for the Band of Agents Hackathon (Track 3 — Regulated & High-Stakes Workflows).
 
 The repo has two independent halves that both produce the same output shape (a **transcript**):
 
-- `web/` — Next.js 16 app. The landing page and the **Chamber** (`/chamber`), which runs a *live* cross-model debate entirely inside a Next.js API route by calling the Anthropic API directly (no Band dependency). This is what the deployed demo uses.
+- `web/` — Next.js 16 app. The landing page and the **Chamber** (`/chamber`). By default the Chamber replays bundled, pre-written **sample** hearings entirely in the browser (`web/src/lib/useSampleHearing.ts`): no API call, no database. Opt-in **durable hearings** (`NEXT_PUBLIC_DURABLE_HEARINGS=1`, local long-running Node only) run server-side in SQLite (`web/src/lib/hearings/*`, `/api/hearings*`, `useBackgroundHearing.ts`) and also replay samples.
+- **Hard rule: no paid services.** `web/src/lib/providers.ts` keeps AI generation and server TTS off; an API key must never enable a paid call, and there is no paid fallback. The Python/Band path below calls the Anthropic API and is outside the free configuration.
 - `backend/` — Python. The **Band tribunal runtime**: the same four roles run as separate OS processes, each its own Band agent connected over WebSocket to one shared room, coordinating by `@mentioning` each other. This is the actual multi-agent (Band) submission path.
 
 These two paths are deliberately kept in sync by sharing role prompts/turn order conceptually (`web/src/lib/roles.ts` mirrors `backend/src/juro/roles.py`), but they are separately implemented — changes to the debate flow or prompts usually need to be made in **both** places. The pairs to check whenever you touch either side:
@@ -18,7 +19,7 @@ These two paths are deliberately kept in sync by sharing role prompts/turn order
 | Role prompts / turn order | `backend/src/juro/roles.py` | `web/src/lib/roles.ts` |
 | Case data | `backend/src/juro/cases.py` | `web/src/data/cases.ts` |
 | Transcript schema | `backend/src/juro/transcript.py` | `web/src/lib/types.ts` |
-| Debate generation loop | `backend/src/juro/generate.py` | `web/src/app/api/hearing/route.ts` |
+| Debate generation loop | `backend/src/juro/generate.py` | `web/src/lib/hearings/source.ts` (`liveSource`, disabled by the provider control) + `runner.ts` |
 
 ## Commands
 
@@ -29,8 +30,9 @@ npm install
 npm run dev      # http://localhost:3000
 npm run build
 npm run lint      # eslint
+npm test          # node:test via tsx: src/lib/hearings/*.test.ts
 ```
-Live hearings and voices need `ANTHROPIC_API_KEY` and `DEEPGRAM_API_KEY` in `web/.env.local`. Without keys, the app still runs using the bundled sample transcript (`web/src/data/sample-transcript.ts`).
+No keys are used. Sample cases live in `web/src/data/cases.ts`. Durable hearings: set `NEXT_PUBLIC_DURABLE_HEARINGS=1` (inlined at build time) and see `web/README.md` for the related env vars.
 
 ### Backend (`backend/`)
 ```bash
@@ -57,18 +59,21 @@ The Band SDK pins a private git submodule pip can't clone directly — install i
 
 Case ids: `mri-erisa`, `pet-oncology`, `snf-jimmo` (defined in `backend/src/juro/cases.py`).
 
-No test suite currently exists in either half despite `pytest`/`pytest-asyncio` being listed as backend dev dependencies. To sanity-check a change, run it end-to-end and inspect the output: `python -m juro.generate` for the local/Chamber path (check the resulting transcript JSON and that `auditRoot` still validates), or start all four `agents/*.py` processes plus `band_runner case`/`export` for the Band relay path.
+The web half has tests for the durable-hearing store/runner, provider controls and request validation (`npm test`). The backend has none despite `pytest`/`pytest-asyncio` being listed as dev dependencies; sanity-check it end-to-end: `python -m juro.generate` (check the transcript JSON and that `auditRoot` validates), or the four `agents/*.py` processes plus `band_runner case`/`export` for the Band relay path.
 
 ## Architecture
 
 ### The transcript is the contract
-Both the Chamber and the Band runtime ultimately produce a JSON object shaped like `web/src/lib/types.ts` (`case`, `evidence`, `turns[]`, `verdict`, `auditRoot`). The Python-side equivalent is `backend/src/juro/transcript.py`. Front-end playback (`web/src/lib/useTranscript.ts`, `usePlayback.ts`) only ever consumes this shape, regardless of which path produced it — so a change to the transcript schema must be mirrored in both `types.ts` and `transcript.py`, plus the NDJSON turn events emitted by `web/src/app/api/hearing/route.ts`.
+Both the Chamber and the Band runtime ultimately produce a JSON object shaped like `web/src/lib/types.ts` (`case`, `evidence`, `turns[]`, `verdict`, `auditRoot`). The Python-side equivalent is `backend/src/juro/transcript.py`. Front-end playback (`usePlayback.ts` on the landing demo, `useSampleHearing.ts` and `useBackgroundHearing.ts` in the Chamber) consumes this shape, so a schema change must be mirrored in `types.ts`, `transcript.py`, and the durable store's `HearingView` (`web/src/lib/hearings/types.ts`).
+
+### Durable hearings (web, opt-in)
+`store.ts` is the only writer. Rules to keep: every worker-originated mutation checks `worker_id` (a stale worker must not change a newer worker's hearing); Pause is a persisted `pause_requested` flag honoured between steps (the in-flight step is saved, a failed in-flight step pauses without retry, a successful final recommendation completes); queue admission (`createIfRoom`) is one IMMEDIATE transaction; control tokens are stored only as sha256 and authorize actions without identifying the reviewer. Route handlers import the store dynamically after checking `DURABLE_HEARINGS`, so sample-only deployments never load `better-sqlite3`.
 
 ### Hash chain (tamper-evidence)
 `transcript.py`'s `chain_turns()` computes `hash_i = sha256(hash_{i-1} + canonical(turn_i))` over each turn in order, producing an `auditRoot`. This is the "audit-ready" property the regulated-workflow framing depends on — any edit to a past turn breaks the chain. Preserve turn ordering and canonical JSON serialization (`sort_keys=True`, compact separators) if you touch this.
 
 ### Two debate runners, one turn plan vs. one relay
-- **Local/Chamber generator** (`backend/src/juro/generate.py`, mirrored by `web/src/app/api/hearing/route.ts`) uses the full scripted `TURN_PLAN` in `roles.py` / `roles.ts` — a fixed 10-step sequence (opening → argument → rebuttal → evidence → ... → ruling) driven by one process calling the Anthropic API in a loop and asking each model to respond with structured JSON (`{text, addressedTo, evidenceRefs}`).
+- **Local generator** (`backend/src/juro/generate.py`, mirrored by the disabled `liveSource` in `web/src/lib/hearings/source.ts`) uses the full scripted `TURN_PLAN` in `roles.py` / `roles.ts` — a fixed 10-step sequence (opening → argument → rebuttal → evidence → ... → ruling) driven by one process calling the Anthropic API in a loop and asking each model to respond with structured JSON (`{text, addressedTo, evidenceRefs}`).
 - **Band runtime** (`backend/src/juro/agents/*.py`, `band_runner.py`) can't use a scripted loop — Band is mention-driven and each agent is a separate process that only acts when `@mentioned`. Instead it runs a simpler fixed **relay**: `adjudicator(open) → advocate → scrutinizer → evidence → adjudicator(rule)`, defined by `RELAY_ORDER`/`NEXT_VOICE`/`HANDOFF` in `roles.py`. Each agent's Band prompt (`band_section()`) instructs it to end its turn by `@mentioning` the next voice by name.
 
 ### The relay-hardening adapter (`backend/src/juro/agents/base.py`)
@@ -85,10 +90,10 @@ The three debaters (`advocate`, `scrutinizer`, `evidence`) run on a fast/light m
 `roles.py`'s `SHARED_RULES` + per-role `SYSTEM_PROMPTS` define each agent's voice once; both the local generator and the Band agents build on top of them (Band agents additionally append `band_section(role)` for the relay/handoff protocol). Keep `roles.py` and `web/src/lib/roles.ts` prompt content in sync when changing agent behavior, since the two runners must debate identically.
 
 ### Case data lives in two places
-`backend/src/juro/cases.py` (Python, used by `band_runner.py`/`generate.py`) and `web/src/data/cases.ts` (TS, used by the Chamber's `/api/hearing` route) both define the same sample cases (claim, evidence, denial reason). Adding or editing a case means updating both.
+`backend/src/juro/cases.py` (Python, used by `band_runner.py`/`generate.py`) and `web/src/data/cases.ts` (TS, the Chamber's sample hearings) both define the same sample cases (claim, evidence, denial reason). Adding or editing a case means updating both.
 
 ### Voice playback (Chamber only)
-`web/src/app/api/speak/route.ts` and `web/src/lib/useVoice.ts` add spoken playback of turns in the Chamber UI via Deepgram TTS (`DEEPGRAM_API_KEY`). This is presentation-layer only — it consumes the same transcript shape and has no equivalent on the Band side, since the Band runtime just posts text to a room.
+`web/src/lib/useVoice.ts` reads turns aloud with the browser's speech synthesis (free). `web/src/app/api/speak/route.ts` (Deepgram) is disabled by the `tts` provider control. This is presentation-layer only — it consumes the same transcript shape and has no equivalent on the Band side, since the Band runtime just posts text to a room.
 
 ### Config/credentials flow (Band path only)
 `band_runner.py setup` registers 4 agents via Band's REST API, writes their id/api_key to `backend/agent_config.yaml` (gitignored) and appends `VERDICT_TRIBUNAL_ROOM_ID` to `backend/.env`. `band_runner.py case [case_id]` similarly appends `VERDICT_CASE_ID` after a successful submit, so `export` later knows which of the 3 sample cases' `case`/`evidence` data to pair with the room's turns (it doesn't otherwise appear anywhere in the room transcript). Each agent process (`agents/advocate.py` etc.) reads its own credentials out of `agent_config.yaml` via `_load_agent_creds()` in `base.py`. The actual HTTP calls (register agent, create room, add participant, send message) live in `band_api.py`, a thin async wrapper over Band's Human API. Room creation over REST requires an Enterprise Band plan; on a normal account it 403s and the room must be created manually in the Band web app instead (`setup` detects this and prints fallback instructions).

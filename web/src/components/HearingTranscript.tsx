@@ -60,7 +60,7 @@ const SEAT_ENGINE: Record<Faction, string> = {
 };
 
 /** The panel of seats. The agent who holds the floor lights up. */
-export function Bench({ active }: { active: Faction | null }) {
+export function Bench({ active, live = false }: { active: Faction | null; live?: boolean }) {
   return (
     <div className="flex flex-col gap-2">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -84,10 +84,11 @@ export function Bench({ active }: { active: Faction | null }) {
           );
         })}
       </div>
-      {/* The panel spans two models on purpose — make that legible. */}
+      {/* Say what is actually producing the turns: a pre-written sample, or named live models. */}
       <p className="mono text-[10px] leading-relaxed text-cchalkdim">
-        cross-model panel · three debaters on {engineLabel(SEAT_ENGINE.advocate)} ·
-        chair on {engineLabel(SEAT_ENGINE.adjudicator)}
+        {live
+          ? `live panel · three debaters on ${engineLabel(SEAT_ENGINE.advocate)} · chair on ${engineLabel(SEAT_ENGINE.adjudicator)}`
+          : "sample record · these turns are pre-written; no AI model is running"}
       </p>
     </div>
   );
@@ -223,6 +224,7 @@ export function HearingTranscript({
   onCite,
   showBench = true,
   autoScroll = true,
+  live = false,
 }: {
   turns: Turn[];
   all: Turn[];
@@ -231,6 +233,8 @@ export function HearingTranscript({
   onCite?: (id: string) => void;
   showBench?: boolean;
   autoScroll?: boolean;
+  /** True only when real models produced these turns; otherwise the bench is labelled a sample. */
+  live?: boolean;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -256,7 +260,7 @@ export function HearingTranscript({
 
   return (
     <div className="flex flex-col gap-5">
-      {showBench && <Bench active={activeAgent} />}
+      {showBench && <Bench active={activeAgent} live={live} />}
       <div className="flex flex-col gap-4">
         <AnimatePresence initial={false}>
           {turns.map((t) => (

@@ -1,4 +1,4 @@
-Juro's Next.js half — the landing page and the Chamber (live cross-model hearing). See the repo root [README](../README.md) and [CLAUDE.md](../CLAUDE.md) for the full project.
+Juro's Next.js half: the landing page and the Chamber. See the repo root [README](../README.md) and [CLAUDE.md](../CLAUDE.md) for the full project.
 
 ## Getting started
 
@@ -7,53 +7,52 @@ npm install
 npm run dev      # http://localhost:3000
 npm run build
 npm run lint
+npm test         # durable-hearing store, runner, provider and request-validation tests
 ```
 
-## Environment variables
+## No paid services
 
-Without any keys, the app still runs fully at `localhost:3000` — the Chamber falls back to the bundled sample transcript (`src/data/cases.ts`) and voice playback is simply unavailable. Add keys to go live:
+The app makes no paid API calls. Both provider controls in `src/lib/providers.ts` are off:
 
-Create `web/.env.local` (gitignored) with:
-
-```
-ANTHROPIC_API_KEY=sk-ant-...     # required for live hearings (/api/hearing)
-DEEPGRAM_API_KEY=...             # required for spoken playback (/api/speak)
-```
-
-| Key | Where to get it |
+| Control | Effect |
 |---|---|
-| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/) → Settings → API Keys |
-| `DEEPGRAM_API_KEY` | [console.deepgram.com](https://console.deepgram.com/) → API Keys (free tier available) |
+| `generation` | No AI model is called. Every hearing replays the bundled sample record (`src/data/cases.ts`). Checked inside every provider call, so retries and queued work stop too. |
+| `tts` | `/api/speak` returns `503 provider_disabled`. **Listen** uses the browser's speech synthesis instead. |
 
-Restart `npm run dev` after editing `.env.local` — it's only read at startup.
+API keys (`ANTHROPIC_API_KEY`, `DEEPGRAM_API_KEY`) are ignored; setting one does not enable anything.
 
-## Learn more
+## Two hearing modes
 
-- [Next.js Documentation](https://nextjs.org/docs)
-- [Learn Next.js](https://nextjs.org/learn)
+**Sample playback (default).** The Chamber replays a sample hearing entirely in the browser: no hearing API call, no database, nothing saved. Leaving the page ends it, and the reviewer's ruling stays in that browser. This is what a static/serverless deployment serves. With the flag off, every `/api/hearings*` route returns `404 durable_hearings_disabled` and SQLite is never loaded.
 
-## Background hearings
-
-A hearing runs on the server, not in the browser tab. Starting one (`POST /api/hearings`) returns an id; the Chamber moves to `/chamber/<id>`, and that link can be closed and reopened at any time. Turns and state are stored in SQLite (`.data/hearings.db`, gitignored), so a reopened hearing shows the same turns with the same hashes.
+**Durable hearings (opt-in, local).** Set `NEXT_PUBLIC_DURABLE_HEARINGS=1` (in `.env.local`, then restart or rebuild; it is inlined at build time). Hearings then run on the server and are stored in SQLite (`.data/hearings.db`, gitignored), survive closing the tab and server restarts, and can be reopened at `/chamber/<id>`. They need a long-running Node server (`npm run dev`, or `npm run build && npm start`), not a serverless host.
 
 | State | Meaning |
 |---|---|
 | `waiting` | queued |
 | `running` | generating turns (retries temporary failures with backoff, never duplicating a turn) |
-| `paused` | paused by the reviewer, or by the system after a rate limit / repeated temporary failure; **Resume** continues from the next turn |
-| `failed` | permanent failure before any turn (bad API key, rejected request) with a reason and next action; **Retry** |
+| `paused` | paused by the reviewer, or by the system after repeated temporary failures; **Resume** continues from the next turn |
+| `failed` | permanent failure before any turn, with a reason and next action; **Retry** |
 | `partial` | permanent failure after some turns; kept on the record but **cannot be ruled on**; **Retry** continues it |
 | `complete` | every turn and the recommendation are stored; the only state the reviewer can rule on |
 
-It needs a long-running Node server (`npm run dev`, or `npm run build && npm start`), not a serverless host. If the server restarts mid-hearing, it picks the hearing back up from the last stored turn.
+**Pause** lets the step in progress finish and saves it, then stops before the next one (the banner shows *Pausing…*). If that step fails, the hearing pauses without retrying; if it was the final recommendation, the hearing completes.
+
+**Access.** Creating a hearing returns a one-time control token, kept in that browser's `localStorage` (only its hash is stored on the server). Anyone with the link can view; only the token holder can pause, resume, retry or rule. The token authorizes those actions; it does not identify the reviewer. Hearings created before tokens existed are read-only.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | none | Live hearings. Without it, hearings run in **sample mode** from the bundled cases, so no key is needed to try the whole flow. |
-| `HEARING_MODE` | auto | Set `sample` to force sample mode even when a key is present. |
-| `HEARING_SAMPLE_DELAY_MS` | `1500` | Pause between turns in sample mode. |
+| `NEXT_PUBLIC_DURABLE_HEARINGS` | off | `1` enables durable server-side hearings. |
+| `HEARING_SAMPLE_DELAY_MS` | `1500` | Pause between turns when a durable hearing replays the sample. |
 | `HEARINGS_DB_PATH` | `.data/hearings.db` | Where the SQLite file lives. |
+| `HEARINGS_MAX_OPEN` | `10` | Queued + running hearings allowed at once (`429 queue_full` beyond). Checked atomically with creation. |
 
-API: `GET /api/hearings/<id>?after=<seq>` (state + turns after `seq`), `PATCH /api/hearings/<id>` with `{"action":"pause"|"resume"|"retry"}`, `POST /api/hearings/<id>/ruling` with `{"decision":"OVERTURNED"|"UPHELD"|"REMANDED"}` (409 unless the hearing is complete).
+API (durable mode only):
+- `POST /api/hearings` with `{"caseId": ...}` returns `{ id, status, mode, controlToken }`.
+- `GET /api/hearings/<id>?after=<seq>` returns state plus the turns after `seq`.
+- `PATCH /api/hearings/<id>` with `{"action":"pause"|"resume"|"retry"}` and an `x-hearing-control: <token>` header.
+- `POST /api/hearings/<id>/ruling` with `{"decision":"OVERTURNED"|"UPHELD"|"REMANDED"}` and the same header. Returns 409 unless the hearing is complete.
 
-Tests: `npm test` (runner, retries, pause/resume, partial-hearing guard, crash recovery).
+Bodies must be JSON objects (anything else returns 400). A missing or wrong token returns 403.
+
+`better-sqlite3` ships prebuilt binaries for common platforms, so `npm ci` works even when npm blocks its install script.

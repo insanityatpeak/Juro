@@ -33,7 +33,7 @@ export function DemoSection() {
             <h2 className="display text-[34px] leading-tight text-cchalk md:text-[52px]">See a denial argued.</h2>
           </div>
           <span className="mono flex items-center gap-2 text-[11px] text-cchalkdim">
-            <span className="h-1.5 w-1.5 rounded-full" style={{ background: "var(--c-brass)" }} /> live · on loop
+            <span className="h-1.5 w-1.5 rounded-full" style={{ background: "var(--c-brass)" }} /> sample · on loop
           </span>
         </div>
         <div className="overflow-hidden rounded-lg border border-cinkline bg-cink2/50 shadow-[0_30px_80px_-40px_rgba(0,0,0,0.6)]">
@@ -52,7 +52,7 @@ export function DemoSection() {
         </div>
         <div className="mt-6 text-center">
           <Link href="/chamber" className="mono text-[12px] text-cbrass hover:underline">
-            OPEN THE CHAMBER, HEAR THE VOICES, DELIVER A RULING, DRAFT THE APPEAL →
+            OPEN THE CHAMBER, REPLAY A SAMPLE HEARING, DELIVER A RULING →
           </Link>
         </div>
       </div>
