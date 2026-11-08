@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "tsx --test src/lib/hearings/*.test.ts"
+    "test": "tsx --test src/lib/hearings/*.test.ts",
+    "eval:live": "tsx scripts/eval-live.ts"
   },
   "dependencies": {
     "@number-flow/react": "^0.6.0",

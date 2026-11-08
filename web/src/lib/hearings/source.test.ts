@@ -91,12 +91,69 @@ test("a bad key is permanent", async () => {
   await rejectsWith(ask("m", "s", "u"), "auth_failed", "permanent");
 });
 
-test("live turns keep only listed evidence ids and valid addressees", async () => {
-  const src = createLiveSource(async () => '{"text":"The record shows it.","addressedTo":"nobody","evidenceRefs":["EX-01","EX-99","EX-01"]}');
+const adv = (o: Record<string, unknown>) => JSON.stringify({ claim: "The denial ignores the chart.", evidenceRefs: ["EX-01"], ...o });
+
+test("a structured turn is composed into plain text with its evidence ids", async () => {
+  const src = createLiveSource(async () => adv({ rule: "Plan §4.2", missing: "", addressedTo: "nobody" }));
   const g = await src.generateTurn({ entry: CASES[0], seq: 2, turns: [] });
   assert.equal(g.agent, "advocate");
   assert.deepEqual(g.evidenceRefs, ["EX-01"]);
   assert.equal(g.addressedTo, null);
+  assert.match(g.text, /The denial ignores the chart\. \[EX-01\] Rule: Plan §4\.2/);
+});
+
+test("a reference to a nonexistent record rejects the turn instead of being dropped", async () => {
+  const src = createLiveSource(async () => adv({ evidenceRefs: ["EX-01", "EX-99"] }));
+  await rejectsWith(src.generateTurn({ entry: CASES[0], seq: 2, turns: [] }), "bad_output", "transient");
+});
+
+test("a claim needs a record or an honest statement of what is missing", async () => {
+  const bare = createLiveSource(async () => adv({ evidenceRefs: [] }));
+  await rejectsWith(bare.generateTurn({ entry: CASES[0], seq: 2, turns: [] }), "bad_output");
+  const honest = createLiveSource(async () => adv({ evidenceRefs: [], missing: "No peer-reviewed letter on file." }));
+  const g = await honest.generateTurn({ entry: CASES[0], seq: 2, turns: [] });
+  assert.match(g.text, /Not in the record: No peer-reviewed letter/);
+});
+
+test("a rebuttal must answer the other side's strongest point", async () => {
+  const none = createLiveSource(async () => adv({}));
+  await rejectsWith(none.generateTurn({ entry: CASES[0], seq: 3, turns: [] }), "bad_output");
+  const bad = createLiveSource(async () => adv({ response: { strongestPoint: "x", stance: "shrug", why: "y" } }));
+  await rejectsWith(bad.generateTurn({ entry: CASES[0], seq: 3, turns: [] }), "bad_output");
+  const ok = createLiveSource(async () => adv({ response: { strongestPoint: "The chart is undated.", stance: "dispute", why: "EX-01 carries a date." } }));
+  const g = await ok.generateTurn({ entry: CASES[0], seq: 3, turns: [] });
+  assert.match(g.text, /^Their strongest point: The chart is undated\. I dispute: EX-01 carries a date\./);
+});
+
+test("evidence classifies claims and cannot settle one without citing a record", async () => {
+  const f = (o: Record<string, unknown>) => JSON.stringify({ findings: [{ claim: "Imaging was ordered.", status: "supported", evidenceRefs: ["EX-01"], ...o }], missing: "Prior authorization letter." });
+  const ok = await createLiveSource(async () => f({})).generateTurn({ entry: CASES[0], seq: 4, turns: [] });
+  assert.match(ok.text, /Supported: Imaging was ordered\. \[EX-01\]\./);
+  assert.match(ok.text, /Missing from the record: Prior authorization letter/);
+  await rejectsWith(createLiveSource(async () => f({ evidenceRefs: [] })).generateTurn({ entry: CASES[0], seq: 4, turns: [] }), "bad_output");
+  const open = await createLiveSource(async () => f({ status: "not_established", evidenceRefs: [] })).generateTurn({ entry: CASES[0], seq: 4, turns: [] });
+  assert.match(open.text, /Not established:/);
+});
+
+test("a ruling is structured, and a remand must say what record would resolve it", async () => {
+  const r = (o: Record<string, unknown>) =>
+    JSON.stringify({ decisiveIssue: "Whether therapy was tried.", rule: "Plan §4.2", evidenceRefs: ["EX-01"], strongestOpposing: "No therapy notes.", effectOnOutcome: "It does not change the outcome because EX-01 is dated.", uncertainty: "", recommendation: "OVERTURN", ...o });
+  const ok = await createLiveSource(async () => r({})).generateTurn({ entry: CASES[0], seq: 10, turns: [] });
+  assert.match(ok.text, /Decisive issue:.*Strongest opposing argument:.*Recommendation: OVERTURN\.$/);
+  await rejectsWith(createLiveSource(async () => r({ recommendation: "REMAND" })).generateTurn({ entry: CASES[0], seq: 10, turns: [] }), "bad_output");
+  const remand = await createLiveSource(async () => r({ recommendation: "REMAND", evidenceRefs: [], evidenceNeeded: "The therapy notes." })).generateTurn({ entry: CASES[0], seq: 10, turns: [] });
+  assert.match(remand.text, /Needed to resolve it: The therapy notes\..*Recommendation: REMAND\./);
+  await rejectsWith(createLiveSource(async () => r({ evidenceRefs: [] })).generateTurn({ entry: CASES[0], seq: 10, turns: [] }), "bad_output");
+  await rejectsWith(createLiveSource(async () => r({ recommendation: "MAYBE" })).generateTurn({ entry: CASES[0], seq: 10, turns: [] }), "bad_output");
+});
+
+test("the recommendation can be a remand, which names the record that would resolve it", async () => {
+  const bad = createLiveSource(async () => '{"decision":"REMANDED","rationale":"Unclear."}');
+  await rejectsWith(bad.generateVerdict(CASES[0], []), "bad_output");
+  const good = createLiveSource(async () => '{"decision":"REMANDED","rationale":"The record cannot settle it.","evidenceNeeded":"The therapy notes."}');
+  const v = await good.generateVerdict(CASES[0], []);
+  assert.equal(v.decision, "REMANDED");
+  assert.match(v.rationale, /Needed: The therapy notes\./);
 });
 
 test("a malformed recommendation is retried, never defaulted to a decision", async () => {

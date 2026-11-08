@@ -1,4 +1,5 @@
 import { CASES } from "../data/cases";
+import { MAX_TURN_TEXT } from "./argument";
 import { TURN_PLAN } from "./roles";
 import type { CaseEntry, Faction, Turn, Verdict } from "./types";
 import { SourceError, type TurnSource } from "./hearings/source";
@@ -8,7 +9,7 @@ import { SourceError, type TurnSource } from "./hearings/source";
  * This validates structure, NOT provenance; never expose it directly to browser transcripts.
  * Case and evidence come from bundled synthetic cases. No database or background worker.
  */
-const MAX_TEXT = 800;
+const MAX_TEXT = MAX_TURN_TEXT;
 const VALID_ADDRESSES = new Set<Faction>(["advocate", "scrutinizer", "evidence", "adjudicator", "human"]);
 
 export type LiveStepRequest = { entry: CaseEntry; turns: Pick<Turn, "agent" | "type" | "text" | "addressedTo" | "evidenceRefs">[] };

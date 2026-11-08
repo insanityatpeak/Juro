@@ -187,6 +187,10 @@ def test_compose_ruling_names_the_recommendation_only_when_unambiguous():
     assert mixed.endswith("The recommendation is above. Over to you, reviewer.")
     assert recommendation_in("We should uphold the denial.") == "UPHOLD"
     assert recommendation_in("No view yet.") is None
+    assert recommendation_in("The record cannot settle it; we should remand for the therapy notes.") == "REMAND"
+    assert recommendation_in("Either uphold or remand, depending on EX-04.") is None
+    remand = compose_turn("adjudicator", "rule", "The therapy record is missing. The bench recommends REMAND. Over to you, reviewer.", "Priya")
+    assert remand == "The therapy record is missing. The bench recommends REMAND. Over to you, @Priya."
 
 
 def test_compose_with_only_procedural_text_still_hands_off():

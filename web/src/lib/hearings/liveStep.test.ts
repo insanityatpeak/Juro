@@ -1,3 +1,4 @@
+import { MAX_TURN_TEXT } from "../argument";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CASES } from "../../data/cases";
@@ -34,7 +35,7 @@ test("a live step only accepts a transcript that follows the fixed plan", () => 
   swapped[1].agent = "scrutinizer" as never;
   assert.equal(parseLiveStep({ caseId: CASES[0].id, turns: swapped }), "out_of_order");
   const long = planTurns(1);
-  long[0].text = "x".repeat(801);
+  long[0].text = "x".repeat(MAX_TURN_TEXT + 1);
   assert.equal(parseLiveStep({ caseId: CASES[0].id, turns: long }), "invalid_text");
   const ok = parseLiveStep({ caseId: CASES[0].id, turns: [{ ...planTurns(1)[0], evidenceRefs: ["EX-01", "FAKE"] }] });
   assert.ok(typeof ok !== "string");
