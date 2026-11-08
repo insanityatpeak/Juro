@@ -8,6 +8,10 @@ import type { CaseEntry, Faction, Verdict } from "./types";
 import type { HearingPhase, HearingState } from "./useBackgroundHearing";
 
 const MAX_TRIES = 3;
+// Failures a retry can never fix: the signed session is gone, changed, or out of attempts,
+// or live hearings are off. The reviewer is offered a new hearing instead of Retry.
+const UNRECOVERABLE = new Set(["invalid_session", "session_expired", "context_changed", "attempts_exhausted", "provider_disabled", "preview_disabled"]);
+
 const backoff = (tries: number, retryAfterMs?: number) => Math.min(Math.max(retryAfterMs ?? 0, 2000 * 2 ** (tries - 1)), 30000);
 
 type StepBody =
@@ -26,6 +30,7 @@ export function useLiveBrowserHearing(entry: CaseEntry, inviteCode: string): Hea
   const [started, setStarted] = useState(false);
   const [turns, setTurns] = useState<StoredTurn[]>([]);
   const [status, setStatus] = useState<HearingStatus | null>(null);
+  const [canRetry, setCanRetry] = useState(true);
   const [pauseReason, setPauseReason] = useState<PauseReason | null>(null);
   const [pauseRequested, setPauseRequested] = useState(false);
   const [error, setError] = useState<HearingError | null>(null);
@@ -60,6 +65,7 @@ export function useLiveBrowserHearing(entry: CaseEntry, inviteCode: string): Hea
     runningRef.current = true;
     const my = ++runRef.current;
     setStatus("running");
+    setCanRetry(true);
     setPauseReason(null);
     setError(null);
     setAttempt(0);
@@ -131,8 +137,18 @@ export function useLiveBrowserHearing(entry: CaseEntry, inviteCode: string): Hea
         return;
       }
       if (kind === "permanent" || (res && [400, 403, 409, 410, 413, 503].includes(res.status))) {
+        const recoverable = res?.status !== 503 && !UNRECOVERABLE.has(code);
+        setCanRetry(recoverable);
         setStatus(turnsRef.current.length ? "partial" : "failed");
-        setError({ code, message, nextAction: res?.status === 503 ? "Live hearings are unavailable on this server. Go back and replay the sample instead." : ["invalid_session", "session_expired", "context_changed", "attempts_exhausted"].includes(code) ? "Go back to cases and start a new hearing, or replay the sample." : `Press Retry to continue from ${where()}.` });
+        setError({
+          code,
+          message,
+          nextAction: res?.status === 503
+            ? "Live hearings are unavailable on this server. Start a new hearing to replay the sample instead."
+            : recoverable
+              ? `Press Retry to continue from ${where()}.`
+              : "This live session can't continue. Start a new hearing (a new invited session) or replay the sample.",
+        });
         return;
       }
       tries++;
@@ -233,8 +249,8 @@ export function useLiveBrowserHearing(entry: CaseEntry, inviteCode: string): Hea
   }, [status, run]);
 
   const retry = useCallback(async () => {
-    if (status === "failed" || status === "partial") void run();
-  }, [status, run]);
+    if ((status === "failed" || status === "partial") && canRetry) void run();
+  }, [status, canRetry, run]);
 
   const deliverVerdict = useCallback(async (d: Verdict["decision"]) => setDecision(d), []);
 
@@ -278,5 +294,7 @@ export function useLiveBrowserHearing(entry: CaseEntry, inviteCode: string): Hea
     pause,
     resume,
     retry,
+    /** False when the failure can't be retried (expired/invalid session, live off): offer a new hearing. */
+    canRetry,
   };
 }

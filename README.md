@@ -162,7 +162,17 @@ python -m juro.band_runner brief mri-erisa  # print a case brief to paste into a
 
 Create a room in the Band web app, add the four agents, paste the brief, and `@mention` the Adjudicator. The agents argue; after the Adjudicator's ruling, reply starting with `OVERTURN`, `UPHOLD` or `REMAND`. Then `python -m juro.band_runner export` writes the transcript; it reads the case from the claim id in your brief and refuses to export a hearing without a ruling and your decision.
 
-Before the first full hearing, check that your Groq Free plan lists the model (`GROQ_MODEL`, default `openai/gpt-oss-20b`) and that it calls tools reliably. If not, set `GROQ_MODEL` to another Free-plan model.
+Before the first full hearing, run `python -m juro.groq_check`. It makes at most three capped calls on a synthetic case (no retries, stops at the first rate limit) and reports whether the model calls the send tool with valid arguments, token use, latency and your remaining limits. If it warns, set `GROQ_MODEL` to another Free-plan model.
+
+The Adjudicator's opening, every handoff line and the ruling's closing line are written by code; the models write only the arguments.
+
+### Checks
+
+```bash
+python scripts/verify.py          # everything: case data, provider guards, sample-only, backend + web tests, lint, types, build
+```
+
+Cases live in one file, `data/cases.json`. After editing it, run `python scripts/sync_cases.py` to validate it and regenerate the copies the web app and backend read.
 
 ## Grounded in real law
 

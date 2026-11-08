@@ -127,7 +127,8 @@ function BrowserBanner({ pb }: { pb: HearingState }) {
     tone = "var(--c-oxblood)";
     title = pb.status === "partial" ? `Stopped · ${where}` : "Hearing failed";
     detail = `${reason} This is not a complete record and cannot be ruled on.`;
-    action = { label: "Retry", onClick: pb.retry };
+    // Retry only when it can work; an expired or invalid session needs a new hearing instead.
+    action = pb.canRetry ? { label: "Retry", onClick: pb.retry } : { label: "Start a new hearing", onClick: pb.restart }; // this case's intro: new session or sample
   } else if (pb.pauseRequested) {
     title = `Pausing… · ${where}`;
     detail = "The current step will finish and be kept, then the hearing pauses before the next one.";

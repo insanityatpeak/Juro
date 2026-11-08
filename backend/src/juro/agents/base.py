@@ -134,7 +134,8 @@ class VerdictAgent(ABC):
         """
         from band.adapters import LangGraphAdapter
         from langgraph.checkpoint.memory import InMemorySaver
-        from juro.relay import AdjudicatorPhases, run_turn
+        from juro.cases import CASES
+        from juro.relay import AdjudicatorPhases, compose_turn, opening_text, run_turn
         from juro.roles import NEXT_VOICE
 
         role = self.role
@@ -155,6 +156,13 @@ class VerdictAgent(ABC):
                     elif isinstance(b, str):
                         parts.append(b)
                 return "".join(parts).strip()
+            return ""
+
+        def _msg_text(msg) -> str:
+            for attr in ("content", "text", "body"):
+                value = getattr(msg, attr, None) or (msg.get(attr) if isinstance(msg, dict) else None)
+                if isinstance(value, str) and value:
+                    return value
             return ""
 
         async def _human_name(tools) -> str | None:
@@ -226,10 +234,26 @@ class VerdictAgent(ABC):
                         move = phases.next_move(room_id, getattr(msg, "sender_name", "") or "")
                     forced = await _forced_mentions(move, tools)
                     orig_send = tools.send_message
+                    reviewer_name = forced[0] if move == "rule" and forced else None
+
+                    if move == "open":
+                        # The opening is procedural: code writes it from the case in the brief, with no
+                        # model call (nothing to fail, no quota used). The model speaks when it rules.
+                        try:
+                            await orig_send(opening_text(_msg_text(msg), CASES), mentions=forced)
+                        except Exception:
+                            logger.exception("[RELAY] could not post the opening; @mention Adjudicator to retry")
+                            return None
+                        phases.record(room_id, move)
+                        return None
+
+                    def _compose(content: str) -> str:
+                        # Code writes the handoff / closing line; the model supplies the argument.
+                        return compose_turn(role, move, content or "", reviewer_name)
 
                     async def _send(content, mentions=None):
-                        # Deterministic handoff: ignore the model's choice of mention.
-                        return await orig_send(content, mentions=forced or mentions)
+                        # Deterministic handoff: ignore the model's choice of mention and wording.
+                        return await orig_send(_compose(content), mentions=forced or mentions)
 
                     def _reset():
                         self._sent_this_turn[room_id] = False
@@ -256,6 +280,7 @@ class VerdictAgent(ABC):
                         send=lambda text, mentions: orig_send(text, mentions=mentions),
                         forced=forced,
                         reviewer=lambda: _human_name(tools),
+                        compose=_compose,
                     )
                     # Only a turn that actually reached the room advances the chair's phase, so a
                     # paused or failed turn resumes at the same step when the reviewer @mentions it.

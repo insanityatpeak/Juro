@@ -107,5 +107,6 @@ export function useSampleHearing(entry: CaseEntry): HearingState {
     pause,
     resume,
     retry: noop,
+    canRetry: false,
   };
 }

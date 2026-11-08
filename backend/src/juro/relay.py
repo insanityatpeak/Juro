@@ -91,6 +91,7 @@ async def run_turn(
     forced: list[str],
     reviewer: Callable[[], Awaitable[str | None]],
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    compose: Callable[[str], str] = lambda text: text,
 ) -> bool:
     """Run one agent turn. Returns True if the agent's turn message reached the room."""
     attempt = 0
@@ -122,7 +123,7 @@ async def run_turn(
             if not forced:
                 logger.error("[RELAY] %s has no handoff target; not posting to avoid a loop.", label)
                 return False
-            await send(text, forced)
+            await send(compose(text), forced)
             return True
         await _post_notice(label, notice_text(label, Failure("error", "the model returned nothing")), send, reviewer)
         return False
@@ -160,3 +161,71 @@ class AdjudicatorPhases:
             self._opened.add(room_id)
         else:
             self._opened.discard(room_id)
+
+
+# ---------------------------------------------------------------------------
+# Deterministic phase wording: code writes the procedural parts of every turn (the opening, each
+# handoff, the ruling's closing line); the model supplies only the arguments in between.
+# ---------------------------------------------------------------------------
+
+HANDOFF_LINE: dict[str, str] = {
+    "advocate": "@Scrutinizer, your response.",
+    "scrutinizer": "@Evidence, confirm what the file shows.",
+    "evidence": "@Adjudicator, the record is before you.",
+}
+OPEN_HANDOFF = "@Advocate, present the case for coverage."
+_AGENT_NAMES = ("Advocate", "Scrutinizer", "Evidence", "Adjudicator")
+_ROLE_LABEL = re.compile(r"^\s*(?:\*\*)?(?:advocate|scrutinizer|evidence|adjudicator|the bench)(?:\*\*)?\s*[:\-–—]\s*", re.I)
+# Split only at . ! ? followed by whitespace and a sentence start, so citations such as
+# "29 C.F.R. § 2560.503-1" stay intact; kept sentences are reused verbatim.
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+(?=[A-Z@\"“'(])")
+_CLOSING = re.compile(r"over to you|the bench recommends|your call|reviewer, the call", re.I)
+
+
+def _drop_procedural(text: str, reviewer: str | None) -> str:
+    """Remove role labels, @mention/handoff sentences and the model's own closing line."""
+    text = _ROLE_LABEL.sub("", text.strip())
+    names = list(_AGENT_NAMES) + ([reviewer] if reviewer else [])
+    kept = []
+    for sentence in _SENTENCE_BREAK.split(text):
+        s = sentence.strip()
+        if not s:
+            continue
+        if re.search(r"@\w", s) or any(s.lower().startswith(f"{n.lower()}, ") for n in names):
+            continue  # a handoff ("@Scrutinizer, your response." / "Advocate, begin."): code writes those
+        if _CLOSING.search(s):
+            continue  # the ruling's closing line: code writes it
+        kept.append(s)
+    return " ".join(kept).strip()
+
+
+def recommendation_in(text: str) -> str | None:
+    """OVERTURN / UPHOLD only when the text names exactly one of them."""
+    over = re.search(r"\boverturn(?:ed|ing)?\b", text, re.I) is not None
+    up = re.search(r"\buph(?:old|eld|olding)\b", text, re.I) is not None
+    return "OVERTURN" if over and not up else "UPHOLD" if up and not over else None
+
+
+def compose_turn(role: str, move: str | None, text: str, reviewer: str | None = None) -> str:
+    """The model's argument plus the code-written procedural line for this role and phase."""
+    if role == "adjudicator" and move == "rule":
+        rec = recommendation_in(text)  # read before stripping: the closing line often names it
+        body = _drop_procedural(text, reviewer)
+        who = f"@{reviewer}" if reviewer else "reviewer"
+        close = f"The bench recommends {rec}. Over to you, {who}." if rec else f"The recommendation is above. Over to you, {who}."
+        return f"{body} {close}".strip() if body else close
+    body = _drop_procedural(text, reviewer)
+    line = OPEN_HANDOFF if role == "adjudicator" else HANDOFF_LINE.get(role, "")
+    return f"{body} {line}".strip() if body else line
+
+
+def opening_text(brief: str, cases: dict[str, dict]) -> str:
+    """The chair's opening, written entirely by code from the case named in the brief (no model call)."""
+    for case in cases.values():
+        c = case["case"]
+        if c["claimId"] in (brief or ""):
+            return (f"This tribunal is convened on claim {c['claimId']}, {c['procedure']}, denied by {c['insurer']} as "
+                    f"\"{c['denialReason']}\". The question is whether the record and the governing law support coverage. "
+                    f"{OPEN_HANDOFF}")
+    return ("This tribunal is convened on the claim in the brief above. The question is whether the record and the "
+            f"governing law support coverage. {OPEN_HANDOFF}")
