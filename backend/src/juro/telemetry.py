@@ -11,6 +11,11 @@ room gets its own folder and no id can point outside .telemetry. Several hearing
 split into RUNS: each code-written opening starts a new run (a fresh run id); the summary shows
 the latest run by default.
 
+Limitations: run one hearing at a time per room. Runs are split by log time, which works because
+the relay is sequential, but nothing enforces exclusion across the four agent processes, so
+overlapping hearings in one room are unsupported and their events would mix. Malformed-line counts
+are per room (a torn line can't be attributed to a run), not per run.
+
 Never recorded: message text, prompts, API keys, raw error bodies. Errors are stored as a kind
 (rate_limited, quota_exhausted, provider_disabled, error) plus the exception class name only.
 Token counts the provider does not report are stored as null ("unknown"), never 0.
@@ -357,7 +362,8 @@ def format_summary(hearing: str, s: dict, run: str | None = None) -> str:
     if t["incomplete_turns"]:
         lines.append(f"Warning: {t['incomplete_turns']} turn(s) have no recorded end (still running, crashed, or the log was cut off).")
     if t["malformed_lines"]:
-        lines.append(f"Warning: {t['malformed_lines']} malformed or truncated log line(s) were skipped.")
+        lines.append(f"Warning: {t['malformed_lines']} malformed or truncated log line(s) were skipped "
+                     "(room-wide count across all runs; such lines can't be attributed to a run).")
     return "\n".join(lines)
 
 

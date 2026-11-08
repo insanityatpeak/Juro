@@ -103,7 +103,8 @@ def test_truncated_and_invalid_lines_are_counted_not_fatal(_telemetry_in_tmp, ca
     events, bad = telemetry.load_with_issues("room-m")
     assert bad == 6 and len(events) == 2
     assert telemetry.main(["summary", "room-m"]) == 0
-    assert "6 malformed or truncated log line(s) were skipped" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "6 malformed or truncated log line(s) were skipped" in out and "room-wide" in out
 
 
 def test_turns_without_an_end_are_reported_incomplete(_telemetry_in_tmp, capsys):
