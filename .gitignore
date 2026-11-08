@@ -27,6 +27,9 @@ web/public/transcript.json
 # local verification artifacts (scripts, results, screenshots)
 .verification/
 
+# local hearing telemetry (token/latency counts; no message text)
+.telemetry/
+
 # os / editor
 .DS_Store
 Thumbs.db

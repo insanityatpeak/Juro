@@ -60,6 +60,7 @@ python -m juro.band_runner export           # fetch room messages → web/public
 python -m juro.band_runner teardown         # delete registered Band agents
 
 python -m juro.groq_check   # capped Groq Free check (<=3 calls, synthetic case, no retries): tool calling, tokens, latency, limits
+python -m juro.telemetry summary   # per-turn tokens, unknown usage, retries, rate-limit waits, wall clock for the latest hearing
 python -m juro.generate      # local debate generator — blocked (it calls Anthropic)
 ```
 The Band SDK pins a private git submodule pip can't clone directly — install it from a no-submodule clone (see README "Getting started" section) rather than the plain PyPI/git spec.
@@ -93,6 +94,9 @@ Band agents speak only by calling the `band_send_message` tool — there's no au
 4. **Deterministic wording** — code writes the procedural text: the Adjudicator's opening is posted by code from the brief's case (no model call), each debater's handoff line is appended by `relay.compose_turn` after stripping the model's own mentions/handoffs, and the ruling's closing line names OVERTURN/UPHOLD only when the model's text states exactly one. The model supplies the arguments only.
 
 This is load-bearing for reliability; when modifying agent behavior, keep the deterministic relay guarantee intact rather than trusting the model to self-orchestrate.
+
+### Hearing telemetry (Band path, local)
+`juro/telemetry.py` appends JSON lines to `backend/.telemetry/<room>/<agent>.jsonl` (gitignored; `JURO_TELEMETRY=0` disables, `JURO_TELEMETRY_DIR` moves it). `GuardedChatGroq` (`llm.py`) records every model-call attempt (ok/failed/refused, latency, input/output tokens or `null` when unknown); `run_turn` records attempt numbers, rate-limit waits (separate from model latency) and the turn outcome; `base.py` scopes each message as one turn (ids: hearing = room, agent, turn, attempt, call). Never record message text, prompts, keys or raw error bodies (errors are a kind + exception class). Writes swallow their own errors. The summary's wall clock is earliest start to latest end across agents (calls/turns are logged at their end, so start = end - duration); its 60-second peak is observed usage from calls that reported tokens, not Groq's quota accounting. Tests redirect telemetry to a temp dir and never read the real `backend/.env` (`tests/conftest.py`).
 
 ### Cross-model panel
 Both the web preview and the Band agents use one Groq Free model for all four role prompts (`GROQ_MODEL`, default `openai/gpt-oss-20b`; Band: `backend/src/juro/llm.py`). The Haiku/Sonnet constants in `roles.py` are only referenced by the blocked local generator. Do not describe it as a cross-model tribunal.

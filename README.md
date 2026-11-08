@@ -166,6 +166,8 @@ Before the first full hearing, run `python -m juro.groq_check`. It makes at most
 
 The Adjudicator's opening, every handoff line and the ruling's closing line are written by code; the models write only the arguments.
 
+After a hearing, `python -m juro.telemetry summary` shows what it cost: per-turn input/output tokens (and how many calls didn't report usage), retries, time spent waiting on rate limits, model time, the hearing's wall-clock duration (earliest start to latest end across all four agents), and the peak observed tokens in any 60-second window. That peak is an observation to compare with your tokens-per-minute limit, not Groq's own quota accounting, and calls that didn't report usage aren't counted, so it can understate. The log is local (`backend/.telemetry/`, gitignored) and holds counts and timings only, never message text or keys.
+
 ### Checks
 
 ```bash
