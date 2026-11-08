@@ -9,8 +9,10 @@ The provider's own retries are off: the relay (juro.relay) decides when to wait,
 
 from __future__ import annotations
 
+import contextvars
 import os
 import time
+from contextlib import contextmanager
 from functools import lru_cache
 
 from juro.providers import require_provider
@@ -21,6 +23,27 @@ MAX_OUTPUT_TOKENS = 700  # a 2-4 sentence turn plus one tool call; gpt-oss reaso
 
 def groq_model() -> str:
     return os.environ.get("GROQ_MODEL") or DEFAULT_GROQ_MODEL
+
+
+# Set while a call is being recorded, so a wrapper that delegates to another wrapper (ChatGroq's
+# streaming _agenerate calls _astream) records that call once, not twice.
+_recording: contextvars.ContextVar[bool] = contextvars.ContextVar("juro_recording_call", default=False)
+
+
+@contextmanager
+def _one_record():
+    """Yields True for the outermost wrapper of a call (it records), False for nested ones."""
+    if _recording.get():
+        yield False
+        return
+    token = _recording.set(True)
+    try:
+        yield True
+    finally:
+        try:
+            _recording.reset(token)
+        except ValueError:  # finalized in another context (e.g. a generator closed by GC): never interrupt
+            _recording.set(False)
 
 
 def _record(model: str, started: float, usage: tuple, exc: BaseException | None) -> None:
@@ -50,6 +73,8 @@ def _guarded_class():
 
         def _generate(self, *args, **kwargs):
             started, usage, exc = time.monotonic(), (None, None), None
+            guard = _one_record()
+            outermost = guard.__enter__()
             try:
                 require_provider("groq")
                 result = super()._generate(*args, **kwargs)
@@ -59,10 +84,16 @@ def _guarded_class():
                 exc = e
                 raise
             finally:
-                _record(self.model_name, started, usage, exc)
+                try:
+                    if outermost:
+                        _record(self.model_name, started, usage, exc)
+                finally:
+                    guard.__exit__(None, None, None)
 
         async def _agenerate(self, *args, **kwargs):
             started, usage, exc = time.monotonic(), (None, None), None
+            guard = _one_record()
+            outermost = guard.__enter__()
             try:
                 require_provider("groq")
                 result = await super()._agenerate(*args, **kwargs)
@@ -72,10 +103,16 @@ def _guarded_class():
                 exc = e
                 raise
             finally:
-                _record(self.model_name, started, usage, exc)
+                try:
+                    if outermost:
+                        _record(self.model_name, started, usage, exc)
+                finally:
+                    guard.__exit__(None, None, None)
 
         def _stream(self, *args, **kwargs):
             started, usage, exc = time.monotonic(), (None, None), None
+            guard = _one_record()
+            outermost = guard.__enter__()
             try:
                 require_provider("groq")
                 for chunk in super()._stream(*args, **kwargs):
@@ -87,10 +124,16 @@ def _guarded_class():
                 exc = e
                 raise
             finally:
-                _record(self.model_name, started, usage, exc)
+                try:
+                    if outermost:
+                        _record(self.model_name, started, usage, exc)
+                finally:
+                    guard.__exit__(None, None, None)
 
         async def _astream(self, *args, **kwargs):
             started, usage, exc = time.monotonic(), (None, None), None
+            guard = _one_record()
+            outermost = guard.__enter__()
             try:
                 require_provider("groq")
                 async for chunk in super()._astream(*args, **kwargs):
@@ -102,7 +145,11 @@ def _guarded_class():
                 exc = e
                 raise
             finally:
-                _record(self.model_name, started, usage, exc)
+                try:
+                    if outermost:
+                        _record(self.model_name, started, usage, exc)
+                finally:
+                    guard.__exit__(None, None, None)
 
     return GuardedChatGroq
 

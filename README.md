@@ -166,7 +166,9 @@ Before the first full hearing, run `python -m juro.groq_check`. It makes at most
 
 The Adjudicator's opening, every handoff line and the ruling's closing line are written by code; the models write only the arguments.
 
-After a hearing, `python -m juro.telemetry summary` shows what it cost: per-turn input/output tokens (and how many calls didn't report usage), retries, time spent waiting on rate limits, model time, the hearing's wall-clock duration (earliest start to latest end across all four agents), and the peak observed tokens in any 60-second window. That peak is an observation to compare with your tokens-per-minute limit, not Groq's own quota accounting, and calls that didn't report usage aren't counted, so it can understate. The log is local (`backend/.telemetry/`, gitignored) and holds counts and timings only, never message text or keys.
+After a hearing, `python -m juro.telemetry summary` shows what it cost: per-turn input/output tokens (and how many calls didn't report usage), retries, time spent waiting on rate limits, model time, the hearing's wall-clock duration (earliest start to latest end across all four agents), and the peak observed tokens in any 60-second window. That peak is an observation to compare with your tokens-per-minute limit, not Groq's own quota accounting, and calls that didn't report usage aren't counted, so it can understate. The log is local (`backend/.telemetry/`, gitignored) and holds counts and timings only, never message text or keys. Several hearings in the same room are kept apart as runs (each opening starts one); the summary shows the latest run, `--run N` picks another, `--all` shows every run, and `python -m juro.telemetry list` lists rooms. Malformed or cut-off log lines are skipped and counted, and turns that never finished are flagged.
+
+**Cleaning up telemetry:** it is never deleted automatically. Remove one room's folder under `backend/.telemetry/`, or the whole `backend/.telemetry/` folder; nothing else depends on it.
 
 ### Checks
 

@@ -153,7 +153,8 @@ def test_mocked_hearing_produces_a_telemetry_summary(monkeypatch, _telemetry_in_
     async def no_sleep(_s):
         return None
 
-    monkeypatch.setattr(juro.relay.asyncio, "sleep", no_sleep)
+    # run_turn's sleep default was bound at definition time; replace the default itself.
+    monkeypatch.setitem(juro.relay.run_turn.__kwdefaults__, "sleep", no_sleep)
 
     from juro import telemetry
     from juro.agents.adjudicator import Adjudicator
@@ -170,5 +171,9 @@ def test_mocked_hearing_produces_a_telemetry_summary(monkeypatch, _telemetry_in_
     rows = {r["agent"]: r for r in s["turns"]}
     assert rows["adjudicator"]["outcome"] == "code_opening" and rows["adjudicator"]["calls"] == 0
     assert (rows["advocate"]["calls"], rows["advocate"]["input_tokens"], rows["advocate"]["outcome"]) == (1, 1000, "posted")
-    assert (rows["scrutinizer"]["retries"], rows["scrutinizer"]["wait_s"], rows["scrutinizer"]["outcome"]) == (1, 10.0, "posted")
+    assert (rows["scrutinizer"]["retries"], rows["scrutinizer"]["outcome"]) == (1, "posted")
+    assert rows["scrutinizer"]["wait_s"] < 1  # measured wait; the planned 10s is in the event
+    waits = [e for e in telemetry.load("room-42") if e["event"] == "wait"]
+    assert [w["planned_s"] for w in waits] == [10.0]
+    assert len(telemetry.split_runs(telemetry.load("room-42"))) == 1
     assert s["totals"]["input_tokens"] == 2000 and s["totals"]["missing_usage"] == 0

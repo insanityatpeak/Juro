@@ -9,7 +9,7 @@ import pytest
 from juro import telemetry
 from juro.relay import run_turn
 
-ALLOWED_KEYS = {"v", "ts", "hearing", "agent", "turn", "attempt", "event", "call", "model", "ok", "latency_ms",
+ALLOWED_KEYS = {"v", "ts", "utc", "run", "planned_s", "hearing", "agent", "turn", "attempt", "event", "call", "model", "ok", "latency_ms",
                 "input_tokens", "output_tokens", "error_kind", "error_type", "seconds", "reason", "outcome", "duration_ms"}
 
 
@@ -54,10 +54,11 @@ def test_retry_wait_and_outcome_are_recorded_separately(_telemetry_in_tmp):
     evs = events(_telemetry_in_tmp)
     assert [e["event"] for e in evs] == ["wait", "turn_end"]
     wait, end = evs
-    assert (wait["seconds"], wait["reason"], wait["attempt"]) == (7.0, "rate_limited", 0)
+    assert (wait["planned_s"], wait["reason"], wait["attempt"]) == (7, "rate_limited", 0)
+    assert 0 <= wait["seconds"] < 1  # measured: the test's sleep returns at once
     assert (end["outcome"], end["attempt"], end["turn"]) == ("posted", 1, turn_id)
     s = telemetry.summarize(evs)
-    assert s["turns"][0]["retries"] == 1 and s["totals"]["wait_s"] == 7.0
+    assert s["turns"][0]["retries"] == 1 and s["totals"]["wait_s"] < 1
 
 
 def test_quota_pause_outcome(_telemetry_in_tmp):
@@ -133,7 +134,8 @@ def test_missing_usage_is_unknown_not_zero(model, monkeypatch, _telemetry_in_tmp
     call = [e for e in events(_telemetry_in_tmp) if e["event"] == "model_call"][0]
     assert call["input_tokens"] is None and call["output_tokens"] is None
     s = telemetry.summarize(events(_telemetry_in_tmp))
-    assert s["totals"]["missing_usage"] == 1 and s["totals"]["input_tokens"] == 0
+    assert s["totals"]["missing_usage"] == 1
+    assert s["totals"]["input_tokens"] is None and s["turns"][0]["input_tokens"] is None  # unknown, not 0
 
 
 def test_failed_call_is_recorded_without_error_body(model, monkeypatch, _telemetry_in_tmp):
@@ -198,7 +200,7 @@ def test_summary_per_turn_totals_and_peak_window():
         {"ts": 104.0, "hearing": "h", "agent": "advocate", "turn": "adv-1", "attempt": 0, "event": "model_call", "call": 2, "ok": True, "latency_ms": 1000, "input_tokens": 1300, "output_tokens": 20},
         {"ts": 105.0, "hearing": "h", "agent": "advocate", "turn": "adv-1", "attempt": 0, "event": "turn_end", "outcome": "posted", "duration_ms": 4000},
         {"ts": 110.0, "hearing": "h", "agent": "scrutinizer", "turn": "scr-1", "attempt": 0, "event": "model_call", "call": 1, "ok": False, "latency_ms": 300, "input_tokens": None, "output_tokens": None, "error_kind": "rate_limited"},
-        {"ts": 110.5, "hearing": "h", "agent": "scrutinizer", "turn": "scr-1", "attempt": 0, "event": "wait", "seconds": 30.0, "reason": "rate_limited"},
+        {"ts": 140.5, "hearing": "h", "agent": "scrutinizer", "turn": "scr-1", "attempt": 0, "event": "wait", "seconds": 30.0, "reason": "rate_limited"},
         {"ts": 141.0, "hearing": "h", "agent": "scrutinizer", "turn": "scr-1", "attempt": 1, "event": "model_call", "call": 2, "ok": True, "latency_ms": 2500, "input_tokens": 1500, "output_tokens": 140},
         {"ts": 175.0, "hearing": "h", "agent": "scrutinizer", "turn": "scr-1", "attempt": 1, "event": "turn_end", "outcome": "posted", "duration_ms": 65000},
     ]

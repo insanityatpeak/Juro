@@ -121,8 +121,11 @@ async def run_turn(
                     wait = min(failure.retry_after_s or DEFAULT_WAIT_S, MAX_WAIT_S)
                     attempt += 1
                     logger.info("[RELAY] %s rate limited; waiting %.0fs (retry %d).", label, wait, attempt)
-                    telemetry.wait(wait, "rate_limited")
-                    await sleep(wait)
+                    waited_from = time.monotonic()
+                    try:
+                        await sleep(wait)
+                    finally:  # logged when the wait ends, with the measured (monotonic) duration
+                        telemetry.wait(time.monotonic() - waited_from, "rate_limited", planned=wait)
                     continue
                 await _post_notice(label, notice_text(label, failure, gave_up_waiting=attempt > 0), send, reviewer)
                 outcome = f"paused_{failure.kind}"

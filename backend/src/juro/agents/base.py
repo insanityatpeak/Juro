@@ -249,7 +249,9 @@ class VerdictAgent(ABC):
                                 telemetry.turn_end("opening_send_failed", 0)
                                 return None
                             phases.record(room_id, move)
-                            telemetry.turn_end("code_opening", 0)  # written by code: no model call
+                            # Written by code (no model call). Each opening starts a new run, so several
+                            # hearings in one room stay separate in the telemetry summary.
+                            telemetry.turn_end("code_opening", 0, run=telemetry.new_run_id())
                             return None
 
                         def _compose(content: str) -> str:
