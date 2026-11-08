@@ -223,10 +223,17 @@ def _drop_procedural(text: str, reviewer: str | None) -> str:
 
 
 def recommendation_in(text: str) -> str | None:
-    """OVERTURN / UPHOLD only when the text names exactly one of them."""
-    over = re.search(r"\boverturn(?:ed|ing)?\b", text, re.I) is not None
-    up = re.search(r"\buph(?:old|eld|olding)\b", text, re.I) is not None
-    return "OVERTURN" if over and not up else "UPHOLD" if up and not over else None
+    """OVERTURN / UPHOLD / REMAND only when the text names exactly one of them."""
+    found = {
+        word
+        for word, pattern in (
+            ("OVERTURN", r"\boverturn(?:ed|ing)?\b"),
+            ("UPHOLD", r"\buph(?:old|eld|olding)\b"),
+            ("REMAND", r"\bremand(?:ed|ing)?\b"),
+        )
+        if re.search(pattern, text, re.I)
+    }
+    return found.pop() if len(found) == 1 else None
 
 
 def compose_turn(role: str, move: str | None, text: str, reviewer: str | None = None) -> str:

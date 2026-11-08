@@ -1,4 +1,5 @@
 import { groqBaseUrl, liveModels, LIVE_PROVIDER_LABEL } from "../live";
+import { ArgumentError, clip, parseTurnJson, turnFormat } from "../argument";
 import { providerPolicy, type ProviderPolicy } from "../providers";
 import { SYSTEM_PROMPTS, TURN_PLAN, type Role } from "../roles";
 import type { CaseEntry, Faction, TurnType, Verdict } from "../types";
@@ -47,7 +48,6 @@ export interface TurnSource {
 }
 
 const CALL_TIMEOUT_MS = 25000;
-const VALID_ADDRESSES = new Set<Faction>(["advocate", "scrutinizer", "evidence", "adjudicator", "human"]);
 export const estDur = (t: string) => Math.max(3500, Math.min(8000, t.length * 45));
 
 function brief(entry: CaseEntry): string {
@@ -189,17 +189,22 @@ export function createLiveSource(askFn: typeof ask): TurnSource {
       const [role, kind] = step;
       const validIds = entry.transcript.evidence.map((e) => e.id);
       const user =
-        `${brief(entry)}\n\nDEBATE SO FAR:\n${soFar(turns)}\n\n` +
-        `It is your turn (${role}, ${kind}). Valid evidence ids: ${validIds.join(", ")}.\n` +
-        'Respond ONLY with compact JSON: {"text":"<1-3 sentences>",' +
-        '"addressedTo":"<advocate|scrutinizer|evidence|adjudicator|human|null>",' +
-        '"evidenceRefs":["EX-..",...]}';
+        `${brief(entry)}
+
+DEBATE SO FAR:
+${soFar(turns)}
+
+` +
+        `It is your turn (${role}, ${kind}).
+${turnFormat(role, kind as TurnType, validIds)}`;
       const data = parseJson(await askFn(modelFor(role), SYSTEM_PROMPTS[role], user));
-      const text = typeof data.text === "string" ? data.text.trim().slice(0, 800) : "";
-      if (!text) throw new SourceError("transient", "bad_output", "The model returned an empty turn.");
-      const refs = (Array.isArray(data.evidenceRefs) ? data.evidenceRefs : []).filter((r): r is string => validIds.includes(r as string));
-      const addressedTo = VALID_ADDRESSES.has(data.addressedTo as Faction) ? (data.addressedTo as Faction) : null;
-      return { agent: role, type: kind as TurnType, text, addressedTo, evidenceRefs: [...new Set(refs)], durationMs: estDur(text) };
+      try {
+        const p = parseTurnJson(role, kind as TurnType, data, validIds);
+        return { agent: role, type: kind as TurnType, text: p.text, addressedTo: p.addressedTo, evidenceRefs: p.evidenceRefs, durationMs: estDur(p.text) };
+      } catch (e) {
+        if (e instanceof ArgumentError) throw new SourceError("transient", "bad_output", `The model's turn was rejected: ${e.message}`);
+        throw e;
+      }
     },
 
     /** The AI recommendation. A malformed answer is retried, never defaulted to a decision. */
@@ -207,16 +212,23 @@ export function createLiveSource(askFn: typeof ask): TurnSource {
       const chair = liveModels().chair;
       const user =
         `${brief(entry)}\n\nFULL DEBATE:\n${soFar(turns)}\n\n` +
-        "Recommend a decision for the human reviewer, who makes the final call. " +
-        'Respond ONLY with JSON: {"decision":"OVERTURNED|UPHELD","rationale":"<1-2 sentences>"}';
+        "Recommend a decision for the human reviewer, who makes the final call. Use REMANDED when the record cannot " +
+        "settle the decisive issue, and say what record would. Do not force OVERTURNED or UPHELD on thin evidence. " +
+        'Respond ONLY with JSON: {"decision":"OVERTURNED|UPHELD|REMANDED","rationale":"<1-2 sentences>",' +
+        '"evidenceNeeded":"<required for REMANDED: the specific record that would resolve it; else empty>"}';
       const vd = parseJson(
         await askFn(chair, "You weigh both sides fairly and recommend. Patients deserve a defense; insurers deserve rigor.", user),
       );
-      if (vd.decision !== "OVERTURNED" && vd.decision !== "UPHELD") {
+      if (vd.decision !== "OVERTURNED" && vd.decision !== "UPHELD" && vd.decision !== "REMANDED") {
         throw new SourceError("transient", "bad_output", "The model did not give a valid recommendation.");
       }
-      const rationale = typeof vd.rationale === "string" ? vd.rationale.trim().slice(0, 600) : "";
+      let rationale = clip(vd.rationale, 420);
       if (!rationale) throw new SourceError("transient", "bad_output", "The model gave no rationale.");
+      if (vd.decision === "REMANDED") {
+        const needed = clip(vd.evidenceNeeded, 160);
+        if (!needed) throw new SourceError("transient", "bad_output", "A remand must say what record would resolve it.");
+        rationale = `${rationale} Needed: ${needed}`;
+      }
       // No confidence: a model-reported number is not a calibrated probability.
       return { decision: vd.decision, rationale, by: `AI recommendation · ${LIVE_PROVIDER_LABEL} · ${chair}` };
     },
