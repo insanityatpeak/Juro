@@ -81,24 +81,36 @@ def deliver(adapter, tools, sender, script, room="r1"):
     return asyncio.run(adapter.on_message(msg, tools, [], None, None, is_session_bootstrap=False, room_id=room))
 
 
-def test_debater_handoff_is_forced_and_result_passed_through(adapter_for):
+def test_debater_handoff_is_forced_and_written_by_code(adapter_for):
     a = adapter_for("advocate")
     assert a.kwargs["recursion_limit"] == 4
     tools = FakeTools()
     assert deliver(a, tools, "Adjudicator", ["tool"]) == "adapter-result"
-    assert tools.posts == [("model text", ["Scrutinizer"])]
+    # The model's mention choice is ignored and the handoff line is appended by code.
+    assert tools.posts == [("model text @Scrutinizer, your response.", ["Scrutinizer"])]
 
 
-def test_silent_debater_turn_is_posted(adapter_for):
+def test_silent_debater_turn_is_posted_with_code_handoff(adapter_for):
     tools = FakeTools()
     deliver(adapter_for("advocate"), tools, "Adjudicator", ["answer"])
-    assert tools.posts == [("plain answer", ["Scrutinizer"])]
+    assert tools.posts == [("plain answer @Scrutinizer, your response.", ["Scrutinizer"])]
 
 
-def test_chair_opens_then_rules_and_a_reviewer_resume_does_not_restart(adapter_for):
+def test_opening_is_written_by_code_without_a_model_call(adapter_for):
     chair = adapter_for("adjudicator")
     tools = FakeTools()
-    deliver(chair, tools, "Priya", ["tool"])  # case arrives -> open
+    msg = types.SimpleNamespace(sender_name="Priya", content="CLAIM ON-2026-0612 - brief. @Adjudicator")
+    FakeLangGraphAdapter.script = []  # any model call would fail: pop from an empty list
+    asyncio.run(chair.on_message(msg, tools, [], None, None, is_session_bootstrap=False, room_id="r1"))
+    (text, mentions), = tools.posts
+    assert mentions == ["Advocate"]
+    assert "ON-2026-0612" in text and text.endswith("@Advocate, present the case for coverage.")
+
+
+def test_chair_rules_after_opening_and_a_reviewer_resume_does_not_restart(adapter_for):
+    chair = adapter_for("adjudicator")
+    tools = FakeTools()
+    deliver(chair, tools, "Priya", [])  # case arrives -> code-written opening
     assert tools.posts[-1][1] == ["Advocate"]
     # The ruling hits the daily quota: pause notice to the reviewer, phase stays "ruling".
     deliver(chair, tools, "Evidence", [_RateLimit("tokens per day (TPD)")])
@@ -106,13 +118,5 @@ def test_chair_opens_then_rules_and_a_reviewer_resume_does_not_restart(adapter_f
     assert text.startswith("[tribunal notice]") and mentions == ["Priya"]
     # The reviewer @mentions the chair to resume: it rules (to the reviewer), it does not reopen.
     deliver(chair, tools, "Priya", ["tool"])
-    assert tools.posts[-1] == ("model text", ["Priya"])
-
-
-def test_quota_on_opening_resumes_as_opening(adapter_for):
-    chair = adapter_for("adjudicator")
-    tools = FakeTools()
-    deliver(chair, tools, "Priya", [_RateLimit("requests per day (RPD)")])
-    assert tools.posts[-1][1] == ["Priya"]  # notice only
-    deliver(chair, tools, "Priya", ["tool"])
-    assert tools.posts[-1] == ("model text", ["Advocate"])
+    text, mentions = tools.posts[-1]
+    assert mentions == ["Priya"] and text.startswith("model text") and text.endswith("Over to you, @Priya.")

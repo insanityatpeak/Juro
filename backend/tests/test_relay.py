@@ -5,7 +5,10 @@ import asyncio
 import pytest
 
 from juro.providers import ProviderDisabled
-from juro.relay import NOTICE_PREFIX, AdjudicatorPhases, classify_failure, run_turn
+from juro.cases import CASES
+from juro.relay import (
+    NOTICE_PREFIX, AdjudicatorPhases, classify_failure, compose_turn, opening_text, recommendation_in, run_turn,
+)
 
 
 class _HTTPError(Exception):
@@ -169,3 +172,38 @@ def test_failed_opening_does_not_advance_the_phase():
     move = p.next_move("room", "Priya")
     # run_turn returned False (paused) -> base.py does not record the move
     assert p.next_move("room", "Priya") == move == "open"
+
+
+def test_compose_keeps_citations_and_replaces_the_handoff():
+    out = compose_turn("advocate", None, "Advocate: Under 29 C.F.R. § 2560.503-1 the plan owes a full review. "
+                                           "EX-03 shows progression. @Evidence, check this. Scrutinizer, your turn.")
+    assert out == "Under 29 C.F.R. § 2560.503-1 the plan owes a full review. EX-03 shows progression. @Scrutinizer, your response."
+
+
+def test_compose_ruling_names_the_recommendation_only_when_unambiguous():
+    clear = compose_turn("adjudicator", "rule", "EX-03 proves progression. The bench recommends OVERTURN. Over to you, reviewer.", "Priya")
+    assert clear == "EX-03 proves progression. The bench recommends OVERTURN. Over to you, @Priya."
+    mixed = compose_turn("adjudicator", "rule", "Whether to overturn or uphold turns on EX-04.", None)
+    assert mixed.endswith("The recommendation is above. Over to you, reviewer.")
+    assert recommendation_in("We should uphold the denial.") == "UPHOLD"
+    assert recommendation_in("No view yet.") is None
+
+
+def test_compose_with_only_procedural_text_still_hands_off():
+    assert compose_turn("evidence", None, "@Adjudicator, the record is before you.") == "@Adjudicator, the record is before you."
+
+
+def test_opening_is_built_from_the_brief():
+    assert "ON-2026-0612" in opening_text("CLAIM ON-2026-0612 - D. Okafor", CASES)
+    generic = opening_text("no claim id", CASES)
+    assert generic.startswith("This tribunal is convened on the claim in the brief above") and generic.endswith("coverage.")
+
+
+def test_silent_turn_fallback_is_composed():
+    t = Turn(["answer"])
+    ok = asyncio.run(run_turn(
+        label="Advocate", invoke=t.invoke, reset=t.reset, sent=lambda: t.sent_flag, final_text=lambda: t.text,
+        send=t.send, forced=["Scrutinizer"], reviewer=t.reviewer, sleep=t.sleep,
+        compose=lambda x: compose_turn("advocate", None, x),
+    ))
+    assert ok and t.posts == [("A final answer without the tool. @Scrutinizer, your response.", ["Scrutinizer"])]

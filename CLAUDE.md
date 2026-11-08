@@ -18,11 +18,18 @@ These two paths are deliberately kept in sync by sharing role prompts/turn order
 | Concern | Python | TypeScript |
 |---|---|---|
 | Role prompts / turn order | `backend/src/juro/roles.py` | `web/src/lib/roles.ts` |
-| Case data | `backend/src/juro/cases.py` | `web/src/data/cases.ts` |
+| Case data | generated from `data/cases.json` (`scripts/sync_cases.py`) → `backend/src/juro/cases_data.json` | → `web/src/data/cases.generated.json` |
 | Transcript schema | `backend/src/juro/transcript.py` | `web/src/lib/types.ts` |
 | Debate generation loop | `backend/src/juro/generate.py` (blocked: paid) | `web/src/lib/hearings/source.ts` (`createLiveSource`, Groq free tier) driven by `liveStep.ts` (browser) or `runner.ts` (durable) |
 
 ## Commands
+
+### Whole repo
+```bash
+python scripts/verify.py            # data + provider guards + sample-only + backend pytest + web test/lint/tsc/build
+python scripts/verify.py --quick    # same, without the production build
+python scripts/sync_cases.py        # after editing data/cases.json: validate + regenerate both copies
+```
 
 ### Web app (`web/`)
 ```bash
@@ -52,6 +59,7 @@ python -m juro.band_runner case [case_id]   # submit a case into the tribunal ro
 python -m juro.band_runner export           # fetch room messages → web/public/transcript.json
 python -m juro.band_runner teardown         # delete registered Band agents
 
+python -m juro.groq_check   # capped Groq Free check (<=3 calls, synthetic case, no retries): tool calling, tokens, latency, limits
 python -m juro.generate      # local debate generator — blocked (it calls Anthropic)
 ```
 The Band SDK pins a private git submodule pip can't clone directly — install it from a no-submodule clone (see README "Getting started" section) rather than the plain PyPI/git spec.
@@ -75,13 +83,14 @@ Both the Chamber and the Band runtime ultimately produce a JSON object shaped li
 
 ### Two debate runners, one turn plan vs. one relay
 - **Local generator** (`backend/src/juro/generate.py`, mirrored by `createLiveSource` in `web/src/lib/hearings/source.ts`) uses the full scripted `TURN_PLAN` in `roles.py` / `roles.ts` — a fixed 10-step sequence (opening → argument → rebuttal → evidence → ... → ruling) driven by one process calling the Anthropic API in a loop and asking each model to respond with structured JSON (`{text, addressedTo, evidenceRefs}`).
-- **Band runtime** (`backend/src/juro/agents/*.py`, `band_runner.py`) can't use a scripted loop — Band is mention-driven and each agent is a separate process that only acts when `@mentioned`. Instead it runs a simpler fixed **relay**: `adjudicator(open) → advocate → scrutinizer → evidence → adjudicator(rule)`, defined by `RELAY_ORDER`/`NEXT_VOICE`/`HANDOFF` in `roles.py`. Each agent's Band prompt (`band_section()`) instructs it to end its turn by `@mentioning` the next voice by name.
+- **Band runtime** (`backend/src/juro/agents/*.py`, `band_runner.py`) can't use a scripted loop — Band is mention-driven and each agent is a separate process that only acts when `@mentioned`. Instead it runs a simpler fixed **relay**: `adjudicator(open) → advocate → scrutinizer → evidence → adjudicator(rule)`, defined by `RELAY_ORDER`/`NEXT_VOICE`/`HANDOFF` in `roles.py`. Each agent's Band prompt (`band_section()`) tells it to write only its argument; the relay adds the `@mention` handoff to the next voice in code (`relay.compose_turn`), and the Adjudicator's opening is posted by code.
 
 ### The relay-hardening adapter (`backend/src/juro/agents/base.py`)
 Band agents speak only by calling the `band_send_message` tool — there's no auto-send of a final answer. `VerdictAgent._build_relay_adapter()` wraps `LangGraphAdapter`, and each turn runs through `juro/relay.py`'s `run_turn`:
 1. **Wrong handoff** — the adapter overrides whatever mention the model chose and forces the `@mention` to the correct next voice per `NEXT_VOICE`. The Adjudicator's open-vs-rule branch comes from `AdjudicatorPhases` (per-room state: it rules once it has opened, or when Evidence reports), so a reviewer resuming a paused hearing never restarts it.
 2. **Silent turn** — it captures the model's final streamed text and posts it itself if the tool call never fired.
 3. **Limits and failures** — per-minute 429s are waited out (bounded, two retries); a daily-quota 429 or any other failure posts a `[tribunal notice]` to the human reviewer (never to an agent) and stops; a failure after the agent already posted is not retried (no duplicates). Only a turn that reached the room advances the chair's phase. The exporter skips notices.
+4. **Deterministic wording** — code writes the procedural text: the Adjudicator's opening is posted by code from the brief's case (no model call), each debater's handoff line is appended by `relay.compose_turn` after stripping the model's own mentions/handoffs, and the ruling's closing line names OVERTURN/UPHOLD only when the model's text states exactly one. The model supplies the arguments only.
 
 This is load-bearing for reliability; when modifying agent behavior, keep the deterministic relay guarantee intact rather than trusting the model to self-orchestrate.
 
@@ -91,8 +100,8 @@ Both the web preview and the Band agents use one Groq Free model for all four ro
 ### Shared role prompts
 `roles.py`'s `SHARED_RULES` + per-role `SYSTEM_PROMPTS` define each agent's voice once; both the local generator and the Band agents build on top of them (Band agents additionally append `band_section(role)` for the relay/handoff protocol). Keep `roles.py` and `web/src/lib/roles.ts` prompt content in sync when changing agent behavior, since the two runners must debate identically.
 
-### Case data lives in two places
-`backend/src/juro/cases.py` (Python, used by `band_runner.py`/`generate.py`) and `web/src/data/cases.ts` (TS, the Chamber's sample hearings) both define the same sample cases (claim, evidence, denial reason). Adding or editing a case means updating both.
+### Case data: one canonical file
+`data/cases.json` is the only place to edit cases (case, evidence, pre-written sample turns, sample recommendation, appeal letter). `python scripts/sync_cases.py` validates it and writes `web/src/data/cases.generated.json` (read by `cases.ts`) and `backend/src/juro/cases_data.json` (read by `cases.py`); `--check` (run by `verify.py`) fails on drift. Validation rejects named physicians, `auditRoot`, `confidence` and `by` keys, unknown evidence refs and overlapping claim ids (the Band export finds cases by claim id).
 
 ### Voice playback (Chamber only)
 `web/src/lib/useVoice.ts` reads turns aloud with the browser's speech synthesis (free). `web/src/app/api/speak/route.ts` (Deepgram) is disabled by the `tts` provider control. This is presentation-layer only — it consumes the same transcript shape and has no equivalent on the Band side, since the Band runtime just posts text to a room.

@@ -246,6 +246,7 @@ export function useBackgroundHearing(entry: CaseEntry, initialId: string | null 
     pause: () => act("pause"),
     resume: () => act("resume"),
     retry: () => act("retry"),
+    canRetry: true as boolean,
   };
 }
 
