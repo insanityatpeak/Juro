@@ -1,5 +1,7 @@
 """The Band agents' chat model: Groq's free tier only (see juro.providers).
 
+Every call attempt is recorded locally by juro.telemetry (tokens, latency, outcome; no text).
+
 One model runs all four roles, matching the web live hearings. `GuardedChatGroq` re-checks the
 provider control before EVERY model call, so switching Groq off stops agents mid-hearing too.
 The provider's own retries are off: the relay (juro.relay) decides when to wait, retry or pause.
@@ -7,7 +9,10 @@ The provider's own retries are off: the relay (juro.relay) decides when to wait,
 
 from __future__ import annotations
 
+import contextvars
 import os
+import time
+from contextlib import contextmanager
 from functools import lru_cache
 
 from juro.providers import require_provider
@@ -20,29 +25,131 @@ def groq_model() -> str:
     return os.environ.get("GROQ_MODEL") or DEFAULT_GROQ_MODEL
 
 
+# Set while a call is being recorded, so a wrapper that delegates to another wrapper (ChatGroq's
+# streaming _agenerate calls _astream) records that call once, not twice.
+_recording: contextvars.ContextVar[bool] = contextvars.ContextVar("juro_recording_call", default=False)
+
+
+@contextmanager
+def _one_record():
+    """Yields True for the outermost wrapper of a call (it records), False for nested ones."""
+    if _recording.get():
+        yield False
+        return
+    token = _recording.set(True)
+    try:
+        yield True
+    finally:
+        try:
+            _recording.reset(token)
+        except ValueError:  # finalized in another context (e.g. a generator closed by GC): never interrupt
+            _recording.set(False)
+
+
+def _record(model: str, started: float, usage: tuple, exc: BaseException | None) -> None:
+    """One telemetry line per model-call attempt. Never raises (see juro.telemetry)."""
+    try:
+        from juro import telemetry
+        from juro.relay import classify_failure
+
+        kind = classify_failure(exc).kind if exc is not None else None
+        telemetry.model_call(
+            model=model, ok=exc is None, latency_ms=int((time.monotonic() - started) * 1000),
+            input_tokens=usage[0], output_tokens=usage[1],
+            error_kind=kind, error_type=type(exc).__name__ if exc is not None else None,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @lru_cache(maxsize=1)
 def _guarded_class():
     from langchain_groq import ChatGroq
 
+    from juro.telemetry import usage_from
+
     class GuardedChatGroq(ChatGroq):
-        """ChatGroq that checks the provider control immediately before each call."""
+        """ChatGroq that checks the provider control before each call and records each attempt."""
 
         def _generate(self, *args, **kwargs):
-            require_provider("groq")
-            return super()._generate(*args, **kwargs)
+            started, usage, exc = time.monotonic(), (None, None), None
+            guard = _one_record()
+            outermost = guard.__enter__()
+            try:
+                require_provider("groq")
+                result = super()._generate(*args, **kwargs)
+                usage = usage_from(result)
+                return result
+            except BaseException as e:
+                exc = e
+                raise
+            finally:
+                try:
+                    if outermost:
+                        _record(self.model_name, started, usage, exc)
+                finally:
+                    guard.__exit__(None, None, None)
 
         async def _agenerate(self, *args, **kwargs):
-            require_provider("groq")
-            return await super()._agenerate(*args, **kwargs)
+            started, usage, exc = time.monotonic(), (None, None), None
+            guard = _one_record()
+            outermost = guard.__enter__()
+            try:
+                require_provider("groq")
+                result = await super()._agenerate(*args, **kwargs)
+                usage = usage_from(result)
+                return result
+            except BaseException as e:
+                exc = e
+                raise
+            finally:
+                try:
+                    if outermost:
+                        _record(self.model_name, started, usage, exc)
+                finally:
+                    guard.__exit__(None, None, None)
 
         def _stream(self, *args, **kwargs):
-            require_provider("groq")
-            yield from super()._stream(*args, **kwargs)
+            started, usage, exc = time.monotonic(), (None, None), None
+            guard = _one_record()
+            outermost = guard.__enter__()
+            try:
+                require_provider("groq")
+                for chunk in super()._stream(*args, **kwargs):
+                    got = usage_from(chunk)
+                    if got != (None, None):
+                        usage = got
+                    yield chunk
+            except BaseException as e:
+                exc = e
+                raise
+            finally:
+                try:
+                    if outermost:
+                        _record(self.model_name, started, usage, exc)
+                finally:
+                    guard.__exit__(None, None, None)
 
         async def _astream(self, *args, **kwargs):
-            require_provider("groq")
-            async for chunk in super()._astream(*args, **kwargs):
-                yield chunk
+            started, usage, exc = time.monotonic(), (None, None), None
+            guard = _one_record()
+            outermost = guard.__enter__()
+            try:
+                require_provider("groq")
+                async for chunk in super()._astream(*args, **kwargs):
+                    got = usage_from(chunk)
+                    if got != (None, None):
+                        usage = got
+                    yield chunk
+            except BaseException as e:
+                exc = e
+                raise
+            finally:
+                try:
+                    if outermost:
+                        _record(self.model_name, started, usage, exc)
+                finally:
+                    guard.__exit__(None, None, None)
 
     return GuardedChatGroq
 

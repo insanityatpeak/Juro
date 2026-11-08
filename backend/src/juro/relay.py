@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
@@ -93,40 +94,62 @@ async def run_turn(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     compose: Callable[[str], str] = lambda text: text,
 ) -> bool:
-    """Run one agent turn. Returns True if the agent's turn message reached the room."""
-    attempt = 0
-    while True:
-        reset()
-        try:
-            await invoke()
-        except Exception as exc:  # noqa: BLE001 - every failure must end in a post or a log
-            failure = classify_failure(exc)
-            if sent():
-                # The turn already posted (the failure hit the follow-up model call): done, never repeat it.
-                logger.warning("[RELAY] %s failed after posting (%s); not retrying.", label, failure.kind)
-                return True
-            if failure.kind == "rate_limited" and attempt < MAX_RATE_LIMIT_RETRIES:
-                wait = min(failure.retry_after_s or DEFAULT_WAIT_S, MAX_WAIT_S)
-                attempt += 1
-                logger.info("[RELAY] %s rate limited; waiting %.0fs (retry %d).", label, wait, attempt)
-                await sleep(wait)
-                continue
-            await _post_notice(label, notice_text(label, failure, gave_up_waiting=attempt > 0), send, reviewer)
-            return False
+    """Run one agent turn. Returns True if the agent's turn message reached the room.
 
-        if sent():
-            return True
-        text = final_text()
-        if text:
-            # Silent turn: the model answered without calling band_send_message. Post it ourselves.
-            logger.info("[RELAY] %s answered without the send tool; posting it -> %s", label, forced)
-            if not forced:
-                logger.error("[RELAY] %s has no handoff target; not posting to avoid a loop.", label)
+    Each attempt number, rate-limit wait and the turn's outcome are recorded by juro.telemetry
+    (model calls themselves are recorded by juro.llm). Telemetry never interrupts the turn.
+    """
+    from juro import telemetry
+
+    started = time.monotonic()
+    outcome = "unknown"
+    try:
+        attempt = 0
+        while True:
+            telemetry.set_attempt(attempt)
+            reset()
+            try:
+                await invoke()
+            except Exception as exc:  # noqa: BLE001 - every failure must end in a post or a log
+                failure = classify_failure(exc)
+                if sent():
+                    # The turn already posted (the failure hit the follow-up model call): done, never repeat it.
+                    logger.warning("[RELAY] %s failed after posting (%s); not retrying.", label, failure.kind)
+                    outcome = f"posted_then_{failure.kind}"
+                    return True
+                if failure.kind == "rate_limited" and attempt < MAX_RATE_LIMIT_RETRIES:
+                    wait = min(failure.retry_after_s or DEFAULT_WAIT_S, MAX_WAIT_S)
+                    attempt += 1
+                    logger.info("[RELAY] %s rate limited; waiting %.0fs (retry %d).", label, wait, attempt)
+                    waited_from = time.monotonic()
+                    try:
+                        await sleep(wait)
+                    finally:  # logged when the wait ends, with the measured (monotonic) duration
+                        telemetry.wait(time.monotonic() - waited_from, "rate_limited", planned=wait)
+                    continue
+                await _post_notice(label, notice_text(label, failure, gave_up_waiting=attempt > 0), send, reviewer)
+                outcome = f"paused_{failure.kind}"
                 return False
-            await send(compose(text), forced)
-            return True
-        await _post_notice(label, notice_text(label, Failure("error", "the model returned nothing")), send, reviewer)
-        return False
+
+            if sent():
+                outcome = "posted"
+                return True
+            text = final_text()
+            if text:
+                # Silent turn: the model answered without calling band_send_message. Post it ourselves.
+                logger.info("[RELAY] %s answered without the send tool; posting it -> %s", label, forced)
+                if not forced:
+                    logger.error("[RELAY] %s has no handoff target; not posting to avoid a loop.", label)
+                    outcome = "silent_no_handoff"
+                    return False
+                await send(compose(text), forced)
+                outcome = "posted_fallback"
+                return True
+            await _post_notice(label, notice_text(label, Failure("error", "the model returned nothing")), send, reviewer)
+            outcome = "paused_empty"
+            return False
+    finally:
+        telemetry.turn_end(outcome, int((time.monotonic() - started) * 1000))
 
 
 async def _post_notice(label: str, text: str, send: Send, reviewer: Callable[[], Awaitable[str | None]]) -> None:

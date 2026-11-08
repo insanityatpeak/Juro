@@ -134,6 +134,7 @@ class VerdictAgent(ABC):
         """
         from band.adapters import LangGraphAdapter
         from langgraph.checkpoint.memory import InMemorySaver
+        from juro import telemetry
         from juro.cases import CASES
         from juro.relay import AdjudicatorPhases, compose_turn, opening_text, run_turn
         from juro.roles import NEXT_VOICE
@@ -229,64 +230,70 @@ class VerdictAgent(ABC):
                 # turn, so two messages for the same room arriving back-to-back
                 # must not interleave and clobber each other's in-flight state.
                 async with self._lock_for(room_id):
-                    move = None
-                    if role == "adjudicator":
-                        move = phases.next_move(room_id, getattr(msg, "sender_name", "") or "")
-                    forced = await _forced_mentions(move, tools)
-                    orig_send = tools.send_message
-                    reviewer_name = forced[0] if move == "rule" and forced else None
+                    # One telemetry turn per message: model calls, waits and the outcome carry these ids.
+                    with telemetry.turn(str(room_id), role):
+                        move = None
+                        if role == "adjudicator":
+                            move = phases.next_move(room_id, getattr(msg, "sender_name", "") or "")
+                        forced = await _forced_mentions(move, tools)
+                        orig_send = tools.send_message
+                        reviewer_name = forced[0] if move == "rule" and forced else None
 
-                    if move == "open":
-                        # The opening is procedural: code writes it from the case in the brief, with no
-                        # model call (nothing to fail, no quota used). The model speaks when it rules.
-                        try:
-                            await orig_send(opening_text(_msg_text(msg), CASES), mentions=forced)
-                        except Exception:
-                            logger.exception("[RELAY] could not post the opening; @mention Adjudicator to retry")
+                        if move == "open":
+                            # The opening is procedural: code writes it from the case in the brief, with no
+                            # model call (nothing to fail, no quota used). The model speaks when it rules.
+                            try:
+                                await orig_send(opening_text(_msg_text(msg), CASES), mentions=forced)
+                            except Exception:
+                                logger.exception("[RELAY] could not post the opening; @mention Adjudicator to retry")
+                                telemetry.turn_end("opening_send_failed", 0)
+                                return None
+                            phases.record(room_id, move)
+                            # Written by code (no model call). Each opening starts a new run, so several
+                            # hearings in one room stay separate in the telemetry summary.
+                            telemetry.turn_end("code_opening", 0, run=telemetry.new_run_id())
                             return None
-                        phases.record(room_id, move)
-                        return None
 
-                    def _compose(content: str) -> str:
-                        # Code writes the handoff / closing line; the model supplies the argument.
-                        return compose_turn(role, move, content or "", reviewer_name)
+                        def _compose(content: str) -> str:
+                            # Code writes the handoff / closing line; the model supplies the argument.
+                            return compose_turn(role, move, content or "", reviewer_name)
 
-                    async def _send(content, mentions=None):
-                        # Deterministic handoff: ignore the model's choice of mention and wording.
-                        return await orig_send(_compose(content), mentions=forced or mentions)
+                        async def _send(content, mentions=None):
+                            # Deterministic handoff: ignore the model's choice of mention and wording.
+                            return await orig_send(_compose(content), mentions=forced or mentions)
 
-                    def _reset():
-                        self._sent_this_turn[room_id] = False
-                        self._final_text[room_id] = ""
+                        def _reset():
+                            self._sent_this_turn[room_id] = False
+                            self._final_text[room_id] = ""
 
-                    outcome: dict = {}
+                        outcome: dict = {}
 
-                    async def _invoke():
-                        tools.send_message = _send  # execute_tool_call does getattr(self,"send_message")
-                        try:
-                            outcome["result"] = await super(RelayLangGraphAdapter, self).on_message(
-                                msg, tools, history, participants_msg, contacts_msg,
-                                is_session_bootstrap=is_session_bootstrap, room_id=room_id,
-                            )
-                        finally:
-                            tools.send_message = orig_send
+                        async def _invoke():
+                            tools.send_message = _send  # execute_tool_call does getattr(self,"send_message")
+                            try:
+                                outcome["result"] = await super(RelayLangGraphAdapter, self).on_message(
+                                    msg, tools, history, participants_msg, contacts_msg,
+                                    is_session_bootstrap=is_session_bootstrap, room_id=room_id,
+                                )
+                            finally:
+                                tools.send_message = orig_send
 
-                    spoke = await run_turn(
-                        label=agent_label,
-                        invoke=_invoke,
-                        reset=_reset,
-                        sent=lambda: bool(self._sent_this_turn.get(room_id)),
-                        final_text=lambda: self._final_text.get(room_id, ""),
-                        send=lambda text, mentions: orig_send(text, mentions=mentions),
-                        forced=forced,
-                        reviewer=lambda: _human_name(tools),
-                        compose=_compose,
-                    )
-                    # Only a turn that actually reached the room advances the chair's phase, so a
-                    # paused or failed turn resumes at the same step when the reviewer @mentions it.
-                    if spoke and move:
-                        phases.record(room_id, move)
-                    return outcome.get("result")
+                        spoke = await run_turn(
+                            label=agent_label,
+                            invoke=_invoke,
+                            reset=_reset,
+                            sent=lambda: bool(self._sent_this_turn.get(room_id)),
+                            final_text=lambda: self._final_text.get(room_id, ""),
+                            send=lambda text, mentions: orig_send(text, mentions=mentions),
+                            forced=forced,
+                            reviewer=lambda: _human_name(tools),
+                            compose=_compose,
+                        )
+                        # Only a turn that actually reached the room advances the chair's phase, so a
+                        # paused or failed turn resumes at the same step when the reviewer @mentions it.
+                        if spoke and move:
+                            phases.record(room_id, move)
+                        return outcome.get("result")
 
         return RelayLangGraphAdapter(
             llm=self._create_llm(),

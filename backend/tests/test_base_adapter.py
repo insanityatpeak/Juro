@@ -32,6 +32,11 @@ class FakeLangGraphAdapter:
         step = FakeLangGraphAdapter.script.pop(0)
         if isinstance(step, Exception):
             raise step
+        if step == "llm+tool":  # like LangGraph: one model call (the agent's real GuardedChatGroq), then the tool
+            from langchain_core.messages import HumanMessage
+
+            await self.kwargs["llm"].ainvoke([HumanMessage(content="turn prompt")])
+            step = "tool"
         if step == "tool":
             await self._handle_stream_event({"event": "on_tool_start", "name": "band_send_message"}, room_id, tools)
             await tools.send_message("model text", mentions=["WhoeverTheModelPicked"])
@@ -120,3 +125,55 @@ def test_chair_rules_after_opening_and_a_reviewer_resume_does_not_restart(adapte
     deliver(chair, tools, "Priya", ["tool"])
     text, mentions = tools.posts[-1]
     assert mentions == ["Priya"] and text.startswith("model text") and text.endswith("Over to you, @Priya.")
+
+
+def test_mocked_hearing_produces_a_telemetry_summary(monkeypatch, _telemetry_in_tmp):
+    """Opening (code) -> Advocate -> Scrutinizer (rate limited once, then posts), with mocked Groq calls."""
+    pytest.importorskip("langgraph")
+    lg = pytest.importorskip("langchain_groq")
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    band = types.ModuleType("band")
+    adapters = types.ModuleType("band.adapters")
+    adapters.LangGraphAdapter = FakeLangGraphAdapter
+    band.adapters = adapters
+    monkeypatch.setitem(sys.modules, "band", band)
+    monkeypatch.setitem(sys.modules, "band.adapters", adapters)
+    for k, v in {"JURO_LIVE_PROVIDER": "groq", "GROQ_API_KEY": "gsk_x", "JURO_GROQ_FREE_CONFIRMED": "1"}.items():
+        monkeypatch.setenv(k, v)
+
+    async def fake_agenerate(self, messages, stop=None, run_manager=None, **kw):
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="arg"))],
+                          llm_output={"token_usage": {"prompt_tokens": 1000, "completion_tokens": 120}})
+
+    monkeypatch.setattr(lg.ChatGroq, "_agenerate", fake_agenerate)
+    import juro.relay
+
+    async def no_sleep(_s):
+        return None
+
+    # run_turn's sleep default was bound at definition time; replace the default itself.
+    monkeypatch.setitem(juro.relay.run_turn.__kwdefaults__, "sleep", no_sleep)
+
+    from juro import telemetry
+    from juro.agents.adjudicator import Adjudicator
+    from juro.agents.advocate import Advocate
+    from juro.agents.scrutinizer import Scrutinizer
+
+    tools = FakeTools()
+    chair, adv, scr = Adjudicator()._build_relay_adapter(), Advocate()._build_relay_adapter(), Scrutinizer()._build_relay_adapter()
+    deliver(chair, tools, "Priya", [], room="room-42")
+    deliver(adv, tools, "Adjudicator", ["llm+tool"], room="room-42")
+    deliver(scr, tools, "Advocate", [_RateLimit("tokens per minute"), "llm+tool"], room="room-42")
+
+    s = telemetry.summarize(telemetry.load("room-42"))
+    rows = {r["agent"]: r for r in s["turns"]}
+    assert rows["adjudicator"]["outcome"] == "code_opening" and rows["adjudicator"]["calls"] == 0
+    assert (rows["advocate"]["calls"], rows["advocate"]["input_tokens"], rows["advocate"]["outcome"]) == (1, 1000, "posted")
+    assert (rows["scrutinizer"]["retries"], rows["scrutinizer"]["outcome"]) == (1, "posted")
+    assert rows["scrutinizer"]["wait_s"] < 1  # measured wait; the planned 10s is in the event
+    waits = [e for e in telemetry.load("room-42") if e["event"] == "wait"]
+    assert [w["planned_s"] for w in waits] == [10.0]
+    assert len(telemetry.split_runs(telemetry.load("room-42"))) == 1
+    assert s["totals"]["input_tokens"] == 2000 and s["totals"]["missing_usage"] == 0
